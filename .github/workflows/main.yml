@@ -1,0 +1,382 @@
+# .github/workflows/main.yml
+name: KYD Payment System CI/CD
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main, develop]
+
+env:
+  GO_VERSION: '1.21'
+  REGISTRY: ghcr.io
+  IMAGE_PREFIX: ${{ github.repository }}
+
+jobs:
+  # ==================== CODE QUALITY ====================
+  lint:
+    name: Lint & Format Check
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          
+      - name: golangci-lint
+        uses: golangci/golangci-lint-action@v3
+        with:
+          version: latest
+          args: --timeout=5m
+          
+      - name: Check formatting
+        run: |
+          if [ "$(gofmt -s -l . | wc -l)" -gt 0 ]; then
+            echo "Code is not formatted. Run: gofmt -s -w ."
+            exit 1
+          fi
+
+  # ==================== SECURITY SCANNING ====================
+  security:
+    name: Security Scan
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Run Gosec Security Scanner
+        uses: securego/gosec@master
+        with:
+          args: '-no-fail -fmt sarif -out results.sarif ./...'
+          
+      - name: Upload SARIF file
+        uses: github/codeql-action/upload-sarif@v2
+        with:
+          sarif_file: results.sarif
+          
+      - name: Dependency Check
+        run: |
+          go list -json -m all | nancy sleuth
+
+  # ==================== UNIT TESTS ====================
+  test:
+    name: Unit Tests
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:15
+        env:
+          POSTGRES_PASSWORD: test_password
+          POSTGRES_DB: kyd_test
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 5432:5432
+          
+      redis:
+        image: redis:7
+        options: >-
+          --health-cmd "redis-cli ping"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 6379:6379
+    
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          
+      - name: Cache Go modules
+        uses: actions/cache@v3
+        with:
+          path: ~/go/pkg/mod
+          key: ${{ runner.os }}-go-${{ hashFiles('**/go.sum') }}
+          restore-keys: |
+            ${{ runner.os }}-go-
+            
+      - name: Download dependencies
+        run: go mod download
+        
+      - name: Run migrations
+        env:
+          DATABASE_URL: postgres://postgres:test_password@localhost:5432/kyd_test?sslmode=disable
+        run: |
+          go run cmd/migrate/main.go up
+          
+      - name: Run tests with coverage
+        env:
+          DATABASE_URL: postgres://postgres:test_password@localhost:5432/kyd_test?sslmode=disable
+          REDIS_URL: redis://localhost:6379
+        run: |
+          go test -v -race -coverprofile=coverage.out -covermode=atomic ./...
+          
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@v3
+        with:
+          file: ./coverage.out
+          flags: unittests
+          
+      - name: Generate coverage report
+        run: go tool cover -html=coverage.out -o coverage.html
+        
+      - name: Upload coverage artifact
+        uses: actions/upload-artifact@v3
+        with:
+          name: coverage-report
+          path: coverage.html
+
+  # ==================== INTEGRATION TESTS ====================
+  integration:
+    name: Integration Tests
+    runs-on: ubuntu-latest
+    needs: [test]
+    services:
+      postgres:
+        image: postgres:15
+        env:
+          POSTGRES_PASSWORD: test_password
+          POSTGRES_DB: kyd_integration
+        ports:
+          - 5432:5432
+      redis:
+        image: redis:7
+        ports:
+          - 6379:6379
+    
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          
+      - name: Run integration tests
+        env:
+          DATABASE_URL: postgres://postgres:test_password@localhost:5432/kyd_integration?sslmode=disable
+          REDIS_URL: redis://localhost:6379
+          RUN_INTEGRATION_TESTS: "true"
+        run: |
+          go test -v -tags=integration ./test/integration/...
+
+  # ==================== BUILD SERVICES ====================
+  build:
+    name: Build Service Images
+    runs-on: ubuntu-latest
+    needs: [lint, security, test]
+    strategy:
+      matrix:
+        service: [auth, payment, forex, wallet, settlement, gateway]
+    
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+        
+      - name: Log in to Container Registry
+        uses: docker/login-action@v3
+        with:
+          registry: ${{ env.REGISTRY }}
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+          
+      - name: Extract metadata
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}-${{ matrix.service }}
+          tags: |
+            type=ref,event=branch
+            type=ref,event=pr
+            type=semver,pattern={{version}}
+            type=semver,pattern={{major}}.{{minor}}
+            type=sha,prefix={{branch}}-
+            
+      - name: Build and push
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: ./build/docker/Dockerfile.${{ matrix.service }}
+          push: ${{ github.event_name != 'pull_request' }}
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+          build-args: |
+            SERVICE=${{ matrix.service }}
+            VERSION=${{ github.sha }}
+
+  # ==================== DEPLOY TO STAGING ====================
+  deploy-staging:
+    name: Deploy to Staging
+    runs-on: ubuntu-latest
+    needs: [build, integration]
+    if: github.ref == 'refs/heads/develop'
+    environment:
+      name: staging
+      url: https://staging.kydpay.com
+    
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY }}
+          aws-region: af-south-1
+          
+      - name: Update kubeconfig
+        run: |
+          aws eks update-kubeconfig --name kyd-staging-cluster --region af-south-1
+          
+      - name: Deploy to Kubernetes
+        run: |
+          kubectl apply -f k8s/staging/
+          kubectl set image deployment/auth-service auth=${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}-auth:${{ github.sha }}
+          kubectl set image deployment/payment-service payment=${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}-payment:${{ github.sha }}
+          kubectl set image deployment/forex-service forex=${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}-forex:${{ github.sha }}
+          kubectl set image deployment/wallet-service wallet=${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}-wallet:${{ github.sha }}
+          kubectl set image deployment/settlement-service settlement=${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}-settlement:${{ github.sha }}
+          kubectl rollout status deployment/auth-service
+          kubectl rollout status deployment/payment-service
+          
+      - name: Run smoke tests
+        run: |
+          chmod +x ./scripts/smoke-tests.sh
+          ./scripts/smoke-tests.sh staging
+
+  # ==================== DEPLOY TO PRODUCTION ====================
+  deploy-production:
+    name: Deploy to Production
+    runs-on: ubuntu-latest
+    needs: [build, integration]
+    if: github.ref == 'refs/heads/main'
+    environment:
+      name: production
+      url: https://kydpay.com
+    
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          aws-access-key-id: ${{ secrets.AWS_ACCESS_KEY_ID_PROD }}
+          aws-secret-access-key: ${{ secrets.AWS_SECRET_ACCESS_KEY_PROD }}
+          aws-region: af-south-1
+          
+      - name: Update kubeconfig
+        run: |
+          aws eks update-kubeconfig --name kyd-production-cluster --region af-south-1
+          
+      - name: Blue-Green Deployment
+        run: |
+          # Deploy to green environment
+          kubectl apply -f k8s/production/green/
+          kubectl set image deployment/auth-service-green auth=${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}-auth:${{ github.sha }}
+          kubectl set image deployment/payment-service-green payment=${{ env.REGISTRY }}/${{ env.IMAGE_PREFIX }}-payment:${{ github.sha }}
+          kubectl rollout status deployment/auth-service-green
+          kubectl rollout status deployment/payment-service-green
+          
+          # Run health checks
+          chmod +x ./scripts/health-check.sh
+          ./scripts/health-check.sh green
+          
+          # Switch traffic to green
+          kubectl patch service auth-service -p '{"spec":{"selector":{"version":"green"}}}'
+          kubectl patch service payment-service -p '{"spec":{"selector":{"version":"green"}}}'
+          
+          # Wait and monitor
+          sleep 300
+          
+          # Scale down blue
+          kubectl scale deployment/auth-service-blue --replicas=0
+          kubectl scale deployment/payment-service-blue --replicas=0
+          
+      - name: Notify Slack
+        uses: 8398a7/action-slack@v3
+        with:
+          status: ${{ job.status }}
+          text: 'Production deployment completed'
+          webhook_url: ${{ secrets.SLACK_WEBHOOK }}
+        if: always()
+
+  # ==================== DATABASE MIGRATIONS ====================
+  migrate-production:
+    name: Run Production Migrations
+    runs-on: ubuntu-latest
+    needs: [deploy-production]
+    if: github.ref == 'refs/heads/main'
+    
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          
+      - name: Run migrations
+        env:
+          DATABASE_URL: ${{ secrets.PROD_DATABASE_URL }}
+        run: |
+          go run cmd/migrate/main.go up
+          
+      - name: Backup database
+        env:
+          DATABASE_URL: ${{ secrets.PROD_DATABASE_URL }}
+        run: |
+          chmod +x ./scripts/backup-db.sh
+          ./scripts/backup-db.sh production
+
+  # ==================== PERFORMANCE TESTS ====================
+  performance:
+    name: Load & Performance Tests
+    runs-on: ubuntu-latest
+    needs: [deploy-staging]
+    if: github.ref == 'refs/heads/develop'
+    
+    steps:
+      - uses: actions/checkout@v4
+      
+      - name: Install k6
+        run: |
+          curl -L https://github.com/grafana/k6/releases/download/v0.47.0/k6-v0.47.0-linux-amd64.tar.gz | tar xvz
+          sudo mv k6-v0.47.0-linux-amd64/k6 /usr/local/bin/
+          
+      - name: Run load tests
+        run: |
+          k6 run --out json=results.json test/load/transaction-flow.js
+          
+      - name: Upload results
+        uses: actions/upload-artifact@v3
+        with:
+          name: k6-results
+          path: results.json
+
+  # ==================== CLEANUP ====================
+  cleanup:
+    name: Cleanup Old Images
+    runs-on: ubuntu-latest
+    needs: [deploy-production]
+    if: github.ref == 'refs/heads/main'
+    
+    steps:
+      - name: Delete old container images
+        uses: actions/delete-package-versions@v4
+        with:
+          package-name: ${{ env.IMAGE_PREFIX }}
+          package-type: container
+          min-versions-to-keep: 5
+          delete-only-untagged-versions: true

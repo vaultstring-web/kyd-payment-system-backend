@@ -1,0 +1,12 @@
+# ConfigMap - k8s/configmap.yaml
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: kyd-config
+  namespace: kyd-production
+data:
+  SERVER_HOST: "0.0.0.0"
+  SERVER_PORT: "8080"
+  REDIS_URL: "redis://redis-service:6379"
+  STELLAR_NETWORK_URL: "https://horizon.stellar.org"
+  RIPPLE_SERVER_URL: "wss://s2.ripple.com"

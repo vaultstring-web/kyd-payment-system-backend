@@ -1,0 +1,9 @@
+
+# Namespace - k8s/namespace.yaml
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: kyd-production
+  labels:
+    name: kyd-production

@@ -1,0 +1,138 @@
+﻿
+# ==============================================================================
+# Docker Compose - docker-compose.yml
+version: '3.9'
+
+services:
+  postgres:
+    image: postgres:15-alpine
+    container_name: kyd-postgres
+    environment:
+      POSTGRES_DB: kyd_dev
+      POSTGRES_USER: kyd_user
+      POSTGRES_PASSWORD: kyd_password
+    ports:
+      - "5432:5432"
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+      - ./migrations:/docker-entrypoint-initdb.d
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U kyd_user"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  redis:
+    image: redis:7-alpine
+    container_name: kyd-redis
+    ports:
+      - "6379:6379"
+    volumes:
+      - redis_data:/data
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 3s
+      retries: 5
+
+  auth-service:
+    build:
+      context: .
+      dockerfile: build/docker/Dockerfile.auth
+    container_name: kyd-auth
+    environment:
+      DATABASE_URL: postgres://kyd_user:kyd_password@postgres:5432/kyd_dev?sslmode=disable
+      REDIS_URL: redis://redis:6379
+      JWT_SECRET: your-secret-key-change-in-production
+      SERVER_PORT: 8080
+    ports:
+      - "3000:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  payment-service:
+    build:
+      context: .
+      dockerfile: build/docker/Dockerfile.payment
+    container_name: kyd-payment
+    environment:
+      DATABASE_URL: postgres://kyd_user:kyd_password@postgres:5432/kyd_dev?sslmode=disable
+      REDIS_URL: redis://redis:6379
+      JWT_SECRET: your-secret-key-change-in-production
+      SERVER_PORT: 8080
+    ports:
+      - "3001:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  forex-service:
+    build:
+      context: .
+      dockerfile: build/docker/Dockerfile.forex
+    container_name: kyd-forex
+    environment:
+      DATABASE_URL: postgres://kyd_user:kyd_password@postgres:5432/kyd_dev?sslmode=disable
+      REDIS_URL: redis://redis:6379
+      SERVER_PORT: 8080
+    ports:
+      - "3002:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  wallet-service:
+    build:
+      context: .
+      dockerfile: build/docker/Dockerfile.wallet
+    container_name: kyd-wallet
+    environment:
+      DATABASE_URL: postgres://kyd_user:kyd_password@postgres:5432/kyd_dev?sslmode=disable
+      REDIS_URL: redis://redis:6379
+      SERVER_PORT: 8080
+    ports:
+      - "3003:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+  settlement-service:
+    build:
+      context: .
+      dockerfile: build/docker/Dockerfile.settlement
+    container_name: kyd-settlement
+    environment:
+      DATABASE_URL: postgres://kyd_user:kyd_password@postgres:5432/kyd_dev?sslmode=disable
+      REDIS_URL: redis://redis:6379
+      STELLAR_NETWORK_URL: https://horizon-testnet.stellar.org
+      RIPPLE_SERVER_URL: wss://s.altnet.rippletest.net:51233
+      SERVER_PORT: 8080
+    ports:
+      - "3004:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
+  redis_data:
+
+networks:
+  default:
+    name: kyd-network

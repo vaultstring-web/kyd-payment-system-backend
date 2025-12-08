@@ -1,0 +1,59 @@
+// ==============================================================================
+// .gitignore COMPLETE
+// ==============================================================================
+# Binaries and build artifacts
+*.exe
+*.exe~
+*.dll
+*.so
+*.dylib
+/bin/
+/dist/
+/tmp/
+/build/*.exe
+/build/*.exe~
+
+# Logs
+*.log
+/logs/
+
+# Test coverage
+*.out
+coverage/
+
+# Go workspace
+go.work
+go.work.sum
+
+# Dependencies
+/vendor/
+
+# Environment
+.env
+.env.local
+.env.*.local
+
+# IDE/editor
+.vscode/
+.idea/
+*.swp
+*.swo
+*~
+.DS_Store
+
+# Database files
+*.db
+*.sqlite
+
+# Backups / temp
+backups/
+tmp/
+temp/
+
+# Security artifacts
+security-report.json
+*.pem
+*.key
+
+# Ignore cursor AI rules
+.cursor\\rules\\codacy.mdc

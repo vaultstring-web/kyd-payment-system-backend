@@ -1,0 +1,88 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: forex-service
+  namespace: kyd-production
+  labels:
+    app: forex-service
+    version: v1
+spec:
+  replicas: 3
+  strategy:
+    type: RollingUpdate
+    rollingUpdate:
+      maxSurge: 1
+      maxUnavailable: 0
+  selector:
+    matchLabels:
+      app: forex-service
+      version: v1
+  template:
+    metadata:
+      labels:
+        app: forex-service
+        version: v1
+    spec:
+      containers:
+      - name: forex-service
+        image: ghcr.io/kwachayuan/kyd-forex:latest
+        imagePullPolicy: Always
+        ports:
+        - containerPort: 8080
+          name: http
+        env:
+        - name: DATABASE_URL
+          valueFrom:
+            secretKeyRef:
+              name: kyd-secrets
+              key: database-url
+        - name: REDIS_URL
+          valueFrom:
+            configMapKeyRef:
+              name: kyd-config
+              key: REDIS_URL
+        - name: SERVER_PORT
+          valueFrom:
+            configMapKeyRef:
+              name: kyd-config
+              key: SERVER_PORT
+        resources:
+          requests:
+            memory: "256Mi"
+            cpu: "250m"
+          limits:
+            memory: "512Mi"
+            cpu: "500m"
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 8080
+          initialDelaySeconds: 30
+          periodSeconds: 10
+        readinessProbe:
+          httpGet:
+            path: /ready
+            port: 8080
+          initialDelaySeconds: 10
+          periodSeconds: 5
+        securityContext:
+          runAsNonRoot: true
+          runAsUser: 1000
+          readOnlyRootFilesystem: true
+          allowPrivilegeEscalation: false
+          capabilities:
+            drop:
+            - ALL
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: forex-service
+  namespace: kyd-production
+spec:
+  type: ClusterIP
+  selector:
+    app: forex-service
+  ports:
+  - port: 80
+    targetPort: 8080
