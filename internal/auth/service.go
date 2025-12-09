@@ -1,5 +1,7 @@
+// Package auth implements authentication services (register/login and token issuance).
+//
 // Note: Implement getIntEnv and getDurationEnv similarly
-
+//
 // ==============================================================================
 // AUTH SERVICE - internal/auth/service.go
 // ==============================================================================
@@ -9,24 +11,28 @@ import (
 	"context"
 	"crypto/rand"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"time"
 
 	"kyd/internal/domain"
-	"kyd/pkg/errors"
+	kyderrors "kyd/pkg/errors"
 
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/google/uuid"
+	"github.com/lib/pq"
 	"github.com/shopspring/decimal"
 	"golang.org/x/crypto/bcrypt"
 )
 
+// Service provides user registration, login, and token issuance.
 type Service struct {
 	repo      Repository
 	jwtSecret string
 	jwtExpiry time.Duration
 }
 
+// NewService constructs a Service with the given repository and JWT settings.
 func NewService(repo Repository, jwtSecret string, jwtExpiry time.Duration) *Service {
 	return &Service{
 		repo:      repo,
@@ -35,6 +41,7 @@ func NewService(repo Repository, jwtSecret string, jwtExpiry time.Duration) *Ser
 	}
 }
 
+// RegisterRequest captures the fields required to create a new user.
 type RegisterRequest struct {
 	Email       string          `json:"email" validate:"required,email"`
 	Phone       string          `json:"phone" validate:"required"`
@@ -45,11 +52,13 @@ type RegisterRequest struct {
 	CountryCode string          `json:"country_code" validate:"required,len=2"`
 }
 
+// LoginRequest captures credentials for login.
 type LoginRequest struct {
 	Email    string `json:"email" validate:"required,email"`
 	Password string `json:"password" validate:"required"`
 }
 
+// TokenResponse is returned on successful register/login with issued tokens.
 type TokenResponse struct {
 	AccessToken  string       `json:"access_token"`
 	RefreshToken string       `json:"refresh_token"`
@@ -57,6 +66,7 @@ type TokenResponse struct {
 	User         *domain.User `json:"user"`
 }
 
+// Register creates a new user and returns tokens.
 func (s *Service) Register(ctx context.Context, req *RegisterRequest) (*TokenResponse, error) {
 	// Check if user exists
 	exists, err := s.repo.ExistsByEmail(ctx, req.Email)
@@ -64,7 +74,7 @@ func (s *Service) Register(ctx context.Context, req *RegisterRequest) (*TokenRes
 		return nil, err
 	}
 	if exists {
-		return nil, errors.ErrUserAlreadyExists
+		return nil, kyderrors.ErrUserAlreadyExists
 	}
 
 	// Hash password
@@ -92,6 +102,11 @@ func (s *Service) Register(ctx context.Context, req *RegisterRequest) (*TokenRes
 	}
 
 	if err := s.repo.Create(ctx, user); err != nil {
+		// Handle unique constraint violations (email/phone)
+		var pqErr *pq.Error
+		if errors.As(err, &pqErr) && pqErr.Code == "23505" {
+			return nil, kyderrors.ErrUserAlreadyExists
+		}
 		return nil, err
 	}
 
@@ -99,15 +114,16 @@ func (s *Service) Register(ctx context.Context, req *RegisterRequest) (*TokenRes
 	return s.generateTokens(user)
 }
 
+// Login authenticates a user and returns tokens.
 func (s *Service) Login(ctx context.Context, req *LoginRequest) (*TokenResponse, error) {
 	user, err := s.repo.FindByEmail(ctx, req.Email)
 	if err != nil {
-		return nil, errors.ErrInvalidCredentials
+		return nil, kyderrors.ErrInvalidCredentials
 	}
 
 	// Verify password
 	if err := bcrypt.CompareHashAndPassword([]byte(user.PasswordHash), []byte(req.Password)); err != nil {
-		return nil, errors.ErrInvalidCredentials
+		return nil, kyderrors.ErrInvalidCredentials
 	}
 
 	// Update last login

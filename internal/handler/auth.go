@@ -7,6 +7,7 @@ import (
 	"net/http"
 
 	"kyd/internal/auth"
+	"kyd/pkg/errors"
 	"kyd/pkg/logger"
 	"kyd/pkg/validator"
 )
@@ -51,6 +52,12 @@ func (h *AuthHandler) Register(w http.ResponseWriter, r *http.Request) {
 
 	response, err := h.service.Register(r.Context(), &req)
 	if err != nil {
+		// Handle common errors explicitly so clients get useful feedback.
+		if err == errors.ErrUserAlreadyExists {
+			h.respondError(w, http.StatusConflict, "User already exists")
+			return
+		}
+
 		h.logger.Error("Registration failed", map[string]interface{}{"error": err.Error()})
 		h.respondError(w, http.StatusInternalServerError, "Registration failed")
 		return

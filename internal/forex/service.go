@@ -1,3 +1,5 @@
+// Package forex implements FX rate retrieval, caching, and conversion services.
+//
 // ==============================================================================
 // FOREX SERVICE - internal/forex/service.go
 // ==============================================================================
@@ -9,22 +11,25 @@ import (
 	"sync"
 	"time"
 
-	"github.com/google/uuid"
-	"github.com/shopspring/decimal"
 	"kyd/internal/domain"
 	"kyd/pkg/errors"
 	"kyd/pkg/logger"
+
+	"github.com/google/uuid"
+	"github.com/shopspring/decimal"
 )
 
+// Service provides forex rate retrieval, caching, and conversion.
 type Service struct {
-	repo       Repository
-	cache      RateCache
-	providers  []RateProvider
-	logger     logger.Logger
-	mu         sync.RWMutex
-	rateCache  map[string]*domain.ExchangeRate
+	repo      Repository
+	cache     RateCache
+	providers []RateProvider
+	logger    logger.Logger
+	mu        sync.RWMutex
+	rateCache map[string]*domain.ExchangeRate
 }
 
+// NewService constructs a forex Service with repository, cache, providers, and logger.
 func NewService(repo Repository, cache RateCache, providers []RateProvider, log logger.Logger) *Service {
 	s := &Service{
 		repo:      repo,
@@ -145,12 +150,14 @@ func (s *Service) updateAllRates() {
 	}
 }
 
+// CalculateRequest represents a conversion request payload.
 type CalculateRequest struct {
-	Amount decimal.Decimal `json:"amount" validate:"required,gt=0"`
+	Amount float64         `json:"amount" validate:"required,gt=0"`
 	From   domain.Currency `json:"from" validate:"required"`
 	To     domain.Currency `json:"to" validate:"required"`
 }
 
+// CalculateResponse represents the conversion result payload.
 type CalculateResponse struct {
 	SourceAmount      decimal.Decimal `json:"source_amount"`
 	SourceCurrency    domain.Currency `json:"source_currency"`
@@ -161,18 +168,20 @@ type CalculateResponse struct {
 	TotalAmount       decimal.Decimal `json:"total_amount"`
 }
 
+// Calculate performs a currency conversion using the latest sell rate.
 func (s *Service) Calculate(ctx context.Context, req *CalculateRequest) (*CalculateResponse, error) {
 	rate, err := s.GetRate(ctx, req.From, req.To)
 	if err != nil {
 		return nil, err
 	}
 
-	convertedAmount := req.Amount.Mul(rate.SellRate)
-	feeAmount := req.Amount.Mul(decimal.NewFromFloat(0.015))
-	totalAmount := req.Amount.Add(feeAmount)
+	amountDec := decimal.NewFromFloat(req.Amount)
+	convertedAmount := amountDec.Mul(rate.SellRate)
+	feeAmount := amountDec.Mul(decimal.NewFromFloat(0.015))
+	totalAmount := amountDec.Add(feeAmount)
 
 	return &CalculateResponse{
-		SourceAmount:      req.Amount,
+		SourceAmount:      amountDec,
 		SourceCurrency:    req.From,
 		ConvertedAmount:   convertedAmount,
 		ConvertedCurrency: req.To,
@@ -182,17 +191,20 @@ func (s *Service) Calculate(ctx context.Context, req *CalculateRequest) (*Calcul
 	}, nil
 }
 
+// Repository defines persistence operations for forex rates.
 type Repository interface {
 	CreateRate(ctx context.Context, rate *domain.ExchangeRate) error
 	GetLatestRate(ctx context.Context, from, to domain.Currency) (*domain.ExchangeRate, error)
 	GetRateHistory(ctx context.Context, from, to domain.Currency, limit int) ([]*domain.ExchangeRate, error)
 }
 
+// RateCache defines cache operations for forex rates.
 type RateCache interface {
 	Get(key string) (*domain.ExchangeRate, error)
 	Set(key string, rate *domain.ExchangeRate, ttl time.Duration) error
 }
 
+// RateProvider supplies external forex rates.
 type RateProvider interface {
 	Name() string
 	GetRate(ctx context.Context, from, to domain.Currency) (*domain.ExchangeRate, error)
