@@ -4,20 +4,20 @@
 package main
 
 import (
-	"context"
-	"fmt"
-	"net/http"
-	"net/http/httputil"
-	"net/url"
-	"os"
-	"os/signal"
-	"syscall"
-	"time"
+    "context"
+    "fmt"
+    "net/http"
+    "net/http/httputil"
+    "net/url"
+    "os"
+    "os/signal"
+    "syscall"
+    "time"
 
-	"kyd/pkg/config"
-	"kyd/pkg/logger"
+    "kyd/pkg/config"
+    "kyd/pkg/logger"
 
-	"github.com/gorilla/mux"
+    "github.com/gorilla/mux"
 )
 
 type Gateway struct {
@@ -30,14 +30,29 @@ type Gateway struct {
 }
 
 func NewGateway(log logger.Logger) *Gateway {
-	return &Gateway{
-		authProxy:       createReverseProxy("http://localhost:3000"),
-		paymentProxy:    createReverseProxy("http://localhost:3001"),
-		walletProxy:     createReverseProxy("http://localhost:3003"),
-		forexProxy:      createReverseProxy("http://localhost:3002"),
-		settlementProxy: createReverseProxy("http://localhost:3004"),
-		logger:          log,
-	}
+    // Read target service URLs from environment, fall back to local defaults
+    authURL := getEnv("AUTH_SERVICE_URL", "http://localhost:3000")
+    paymentURL := getEnv("PAYMENT_SERVICE_URL", "http://localhost:3001")
+    walletURL := getEnv("WALLET_SERVICE_URL", "http://localhost:3003")
+    forexURL := getEnv("FOREX_SERVICE_URL", "http://localhost:3002")
+    settlementURL := getEnv("SETTLEMENT_SERVICE_URL", "http://localhost:3004")
+
+    log.Info("Gateway service targets", map[string]interface{}{
+        "auth":       authURL,
+        "payment":    paymentURL,
+        "wallet":     walletURL,
+        "forex":      forexURL,
+        "settlement": settlementURL,
+    })
+
+    return &Gateway{
+        authProxy:       createReverseProxy(authURL),
+        paymentProxy:    createReverseProxy(paymentURL),
+        walletProxy:     createReverseProxy(walletURL),
+        forexProxy:      createReverseProxy(forexURL),
+        settlementProxy: createReverseProxy(settlementURL),
+        logger:          log,
+    }
 }
 
 func createReverseProxy(target string) *httputil.ReverseProxy {
@@ -46,6 +61,15 @@ func createReverseProxy(target string) *httputil.ReverseProxy {
 }
 
 func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
+    // CORS headers for browser clients
+    w.Header().Set("Access-Control-Allow-Origin", "*")
+    w.Header().Set("Access-Control-Allow-Methods", "GET,POST,PUT,PATCH,DELETE,OPTIONS")
+    w.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type, X-Requested-With")
+    w.Header().Set("Access-Control-Expose-Headers", "Content-Length, Content-Type")
+    if r.Method == http.MethodOptions {
+        w.WriteHeader(http.StatusNoContent)
+        return
+    }
 	// Log request
 	g.logger.Info("Gateway request", map[string]interface{}{
 		"method": r.Method,
@@ -75,7 +99,14 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 func matchPath(path, prefix string) bool {
-	return len(path) >= len(prefix) && path[:len(prefix)] == prefix
+    return len(path) >= len(prefix) && path[:len(prefix)] == prefix
+}
+
+func getEnv(key, def string) string {
+    if v := os.Getenv(key); v != "" {
+        return v
+    }
+    return def
 }
 
 func main() {
@@ -88,7 +119,22 @@ func main() {
 
 	gateway := NewGateway(log)
 
-	r := mux.NewRouter()
+    r := mux.NewRouter()
+
+    // Global CORS middleware
+    r.Use(func(next http.Handler) http.Handler {
+        return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+            w.Header().Set("Access-Control-Allow-Origin", "*")
+            w.Header().Set("Access-Control-Allow-Methods", "GET,POST,PUT,PATCH,DELETE,OPTIONS")
+            w.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type, X-Requested-With")
+            w.Header().Set("Access-Control-Expose-Headers", "Content-Length, Content-Type")
+            if r.Method == http.MethodOptions {
+                w.WriteHeader(http.StatusNoContent)
+                return
+            }
+            next.ServeHTTP(w, r)
+        })
+    })
 
 	// Health check
 	r.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {

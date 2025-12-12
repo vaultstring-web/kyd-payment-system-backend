@@ -67,9 +67,10 @@ func main() {
 	// Initialize repositories
 	forexRepo := postgres.NewForexRepository(db)
 
-	// Initialize rate providers
+	// Initialize rate providers (real provider first, mock as fallback)
 	providers := []forex.RateProvider{
-		forex.NewMockRateProvider(), // Replace with real providers
+		forex.NewExchangeRateAPIProvider(),
+		forex.NewMockRateProvider(),
 	}
 
 	// Initialize services

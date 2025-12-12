@@ -109,45 +109,21 @@ function Start-MonitoredService {
                 $ts = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
                 Add-Content -Path $logFile -Value "`n===== [$ts] START ====="
                 
-                # Create a small launcher script so environment variables are set in a child
-                # PowerShell process. Use a unique filename per run and remove it after use.
-                $safeName = ($name -replace '[^A-Za-z0-9_-]', '_')
-                $uniq = [guid]::NewGuid().ToString()
-                $launcherPath = Join-Path $repoRoot "scripts\launcher-$safeName-$uniq.ps1"
-                $launcherContent = @"
-Write-Host 'LAUNCHER ENV:'
-Write-Host "  DATABASE_URL=$env:DATABASE_URL"
-Write-Host "  REDIS_URL=$env:REDIS_URL"
-Write-Host "  JWT_SECRET=$env:JWT_SECRET"
-Write-Host "  SERVER_PORT=$env:SERVER_PORT"
-Write-Host "  CMD=$($svc.cmd)"
-`$env:DATABASE_URL = '$DATABASE_URL'
-`$env:REDIS_URL = '$REDIS_URL'
-`$env:JWT_SECRET = '$JWT_SECRET'
-`$env:SERVER_PORT = '$port'
-Set-Location '$repoRoot'
-& '$($svc.cmd)'
-"@
-                $launcherContent | Out-File -FilePath $launcherPath -Encoding UTF8
+                # Set environment variables for this job's process before starting the service
+                $env:DATABASE_URL = $DATABASE_URL
+                $env:REDIS_URL    = $REDIS_URL
+                $env:JWT_SECRET   = $JWT_SECRET
+                $env:SERVER_PORT  = $port
 
-                # Start the launcher hidden and redirect output to the log file
+                # Start the service executable directly, redirecting output to the log file
                 try {
-                    $powershellExe = "powershell.exe"
-                    $proc = Start-Process -FilePath $powershellExe -ArgumentList @("-NoProfile", "-NoLogo", "-File", $launcherPath) `
-                        -RedirectStandardOutput $logFile -RedirectStandardError $logFile -PassThru -WindowStyle Hidden
-
-                    if ($proc -and $proc.Id) {
-                        Wait-Process -Id $proc.Id
-                    } else {
-                        $msg = "Start-Process returned no process for launcher $launcherPath (powershellExe=$powershellExe, args='-NoProfile -NoLogo -File $launcherPath')"
-                        Add-Content -Path $logFile -Value "===== ERROR: $msg ====="
-                    }
+                    Set-Location $repoRoot
+                    $exePath = $svc.cmd
+                    # Run synchronously in the background job, append all streams to the log file
+                    & $exePath *>> $logFile 2>&1
                 } catch {
                     $err = $_.Exception.Message
-                    Add-Content -Path $logFile -Value "===== ERROR: Failed to start launcher: $err ====="
-                } finally {
-                    # Clean up launcher script
-                    try { Remove-Item -Path $launcherPath -Force -ErrorAction SilentlyContinue } catch {}
+                    Add-Content -Path $logFile -Value "===== ERROR: Failed to start $($exePath): $err ====="
                 }
 
                 $exitTs = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'

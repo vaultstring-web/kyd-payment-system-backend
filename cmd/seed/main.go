@@ -1,138 +1,112 @@
-// ==============================================================================
-// DATABASE SEED - cmd/seed/main.go
-// ==============================================================================
+// Simple seeding tool to create/update a default user for auth login
+// Usage (env overrides):
+//   SEED_EMAIL=john.doe@example.com SEED_PASSWORD=Password123
+// Reads DATABASE_URL and other core config via kyd/pkg/config
 package main
 
 import (
-	"context"
-	"log"
-	"os"
-	"time"
+    "context"
+    "fmt"
+    "os"
+    "time"
 
-	"github.com/google/uuid"
-	"github.com/jmoiron/sqlx"
-	_ "github.com/lib/pq"
-	"github.com/shopspring/decimal"
-	"golang.org/x/crypto/bcrypt"
+    "github.com/google/uuid"
+    "github.com/jmoiron/sqlx"
+    _ "github.com/lib/pq"
+    "github.com/shopspring/decimal"
+    "golang.org/x/crypto/bcrypt"
 
-	"kyd/internal/domain"
-	"kyd/internal/repository/postgres"
+    "kyd/pkg/config"
+    "kyd/pkg/logger"
+    "kyd/internal/repository/postgres"
+    "kyd/pkg/domain"
 )
 
 func main() {
-	databaseURL := os.Getenv("DATABASE_URL")
-	if databaseURL == "" {
-		log.Fatal("DATABASE_URL environment variable is required")
-	}
+    log := logger.New("seed-user")
 
-	db, err := sqlx.Connect("postgres", databaseURL)
-	if err != nil {
-		log.Fatalf("Failed to connect to database: %v", err)
-	}
-	defer db.Close()
+    cfg := config.Load()
+    if err := cfg.ValidateCore(); err != nil {
+        log.Fatal("Invalid configuration", map[string]interface{}{"error": err.Error()})
+    }
 
-	ctx := context.Background()
+    // Defaults; allow override via env
+    email := getenv("SEED_EMAIL", "john.doe@example.com")
+    password := getenv("SEED_PASSWORD", "Password123")
+    phone := getenv("SEED_PHONE", "+265991234567")
+    first := getenv("SEED_FIRST", "John")
+    last := getenv("SEED_LAST", "Doe")
+    country := getenv("SEED_COUNTRY", "MW")
 
-	log.Println("🌱 Seeding database...")
+    db, err := sqlx.Connect("postgres", cfg.Database.URL)
+    if err != nil {
+        log.Fatal("Failed to connect to database", map[string]interface{}{"error": err.Error()})
+    }
+    defer db.Close()
 
-	// Seed users
-	userRepo := postgres.NewUserRepository(db)
-	walletRepo := postgres.NewWalletRepository(db)
-	forexRepo := postgres.NewForexRepository(db)
+    repo := postgres.NewUserRepository(db)
+    ctx := context.Background()
 
-	// Create test users
-	users := []*domain.User{
-		createUser("john.doe@example.com", "John", "Doe", "MW", domain.UserTypeIndividual),
-		createUser("jane.smith@example.com", "Jane", "Smith", "MW", domain.UserTypeMerchant),
-		createUser("wang.wei@example.com", "Wang", "Wei", "CN", domain.UserTypeMerchant),
-	}
+    // Check if user exists
+    exists, err := repo.ExistsByEmail(ctx, email)
+    if err != nil {
+        log.Fatal("ExistsByEmail failed", map[string]interface{}{"error": err.Error()})
+    }
 
-	for _, user := range users {
-		if err := userRepo.Create(ctx, user); err != nil {
-			log.Printf("Failed to create user %s: %v", user.Email, err)
-			continue
-		}
-		log.Printf("✅ Created user: %s", user.Email)
+    if !exists {
+        // Create
+        hash, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
+        if err != nil {
+            log.Fatal("Hash failed", map[string]interface{}{"error": err.Error()})
+        }
+        now := time.Now()
+        u := &domain.User{
+            ID:           uuid.New(),
+            Email:        email,
+            Phone:        phone,
+            PasswordHash: string(hash),
+            FirstName:    first,
+            LastName:     last,
+            UserType:     domain.UserTypeIndividual,
+            KYCLevel:     0,
+            KYCStatus:    domain.KYCStatusPending,
+            CountryCode:  country,
+            RiskScore:    decimal.Zero,
+            IsActive:     true,
+            CreatedAt:    now,
+            UpdatedAt:    now,
+        }
+        if err := repo.Create(ctx, u); err != nil {
+            log.Fatal("Create failed", map[string]interface{}{"error": err.Error()})
+        }
+        log.Info("User created", map[string]interface{}{"email": email})
+        fmt.Println("OK: user created")
+        return
+    }
 
-		// Create wallets for each user
-		currencies := []domain.Currency{domain.MWK, domain.CNY, domain.USD}
-		for _, currency := range currencies {
-			wallet := &domain.Wallet{
-				ID:               uuid.New(),
-				UserID:           user.ID,
-				Currency:         currency,
-				AvailableBalance: decimal.NewFromInt(10000),
-				LedgerBalance:    decimal.NewFromInt(10000),
-				ReservedBalance:  decimal.Zero,
-				Status:           domain.WalletStatusActive,
-				CreatedAt:        time.Now(),
-				UpdatedAt:        time.Now(),
-			}
-
-			if err := walletRepo.Create(ctx, wallet); err != nil {
-				log.Printf("Failed to create wallet for %s: %v", user.Email, err)
-				continue
-			}
-			log.Printf("✅ Created %s wallet for %s", currency, user.Email)
-		}
-	}
-
-	// Seed exchange rates
-	rates := []*domain.ExchangeRate{
-		{
-			ID:             uuid.New(),
-			BaseCurrency:   domain.MWK,
-			TargetCurrency: domain.CNY,
-			Rate:           decimal.NewFromFloat(0.0085),
-			BuyRate:        decimal.NewFromFloat(0.008628),
-			SellRate:       decimal.NewFromFloat(0.008373),
-			Source:         "Market",
-			Spread:         decimal.NewFromFloat(0.015),
-			ValidFrom:      time.Now(),
-			CreatedAt:      time.Now(),
-		},
-		{
-			ID:             uuid.New(),
-			BaseCurrency:   domain.CNY,
-			TargetCurrency: domain.MWK,
-			Rate:           decimal.NewFromFloat(117.65),
-			BuyRate:        decimal.NewFromFloat(119.41),
-			SellRate:       decimal.NewFromFloat(115.89),
-			Source:         "Market",
-			Spread:         decimal.NewFromFloat(0.015),
-			ValidFrom:      time.Now(),
-			CreatedAt:      time.Now(),
-		},
-	}
-
-	for _, rate := range rates {
-		if err := forexRepo.CreateRate(ctx, rate); err != nil {
-			log.Printf("Failed to create rate: %v", err)
-			continue
-		}
-		log.Printf("✅ Created exchange rate: %s -> %s", rate.BaseCurrency, rate.TargetCurrency)
-	}
-
-	log.Println("✅ Database seeding completed!")
+    // Update password for existing user (non-destructive update)
+    user, err := repo.FindByEmail(ctx, email)
+    if err != nil {
+        log.Fatal("FindByEmail failed", map[string]interface{}{"error": err.Error()})
+    }
+    hash, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
+    if err != nil {
+        log.Fatal("Hash failed", map[string]interface{}{"error": err.Error()})
+    }
+    user.PasswordHash = string(hash)
+    now := time.Now()
+    user.UpdatedAt = now
+    if err := repo.Update(ctx, user); err != nil {
+        log.Fatal("Update failed", map[string]interface{}{"error": err.Error()})
+    }
+    log.Info("User password updated", map[string]interface{}{"email": email})
+    fmt.Println("OK: user password updated")
 }
 
-func createUser(email, firstName, lastName, countryCode string, userType domain.UserType) *domain.User {
-	passwordHash, _ := bcrypt.GenerateFromPassword([]byte("Password123"), bcrypt.DefaultCost)
-
-	return &domain.User{
-		ID:           uuid.New(),
-		Email:        email,
-		Phone:        "+265991234567",
-		PasswordHash: string(passwordHash),
-		FirstName:    firstName,
-		LastName:     lastName,
-		UserType:     userType,
-		KYCLevel:     1,
-		KYCStatus:    domain.KYCStatusVerified,
-		CountryCode:  countryCode,
-		RiskScore:    decimal.Zero,
-		IsActive:     true,
-		CreatedAt:    time.Now(),
-		UpdatedAt:    time.Now(),
-	}
+func getenv(key, def string) string {
+    v := os.Getenv(key)
+    if v == "" {
+        return def
+    }
+    return v
 }
