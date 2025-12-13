@@ -245,28 +245,28 @@ func NewTransactionRepository(db *sqlx.DB) *TransactionRepository {
 }
 
 func (r *TransactionRepository) Create(ctx context.Context, tx *domain.Transaction) error {
-	query := `
-		INSERT INTO transactions (
-			id, reference, sender_id, receiver_id, sender_wallet_id, receiver_wallet_id,
-			amount, currency, exchange_rate, converted_amount, converted_currency,
-			fee_amount, fee_currency, status, status_reason, transaction_type,
-			channel, category, description, metadata, blockchain_tx_hash,
-			settlement_id, initiated_at, completed_at, created_at, updated_at
-		) VALUES (
-			$1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15,
-			$16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26
-		)
-	`
+    query := `
+        INSERT INTO transactions (
+            id, reference, sender_id, receiver_id, sender_wallet_id, receiver_wallet_id,
+            amount, currency, exchange_rate, converted_amount, converted_currency,
+            fee_amount, fee_currency, net_amount, status, status_reason, transaction_type,
+            channel, category, description, metadata, blockchain_tx_hash,
+            settlement_id, initiated_at, completed_at, created_at, updated_at
+        ) VALUES (
+            $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16,
+            $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $27
+        )
+    `
 
-	_, err := r.db.ExecContext(ctx, query,
-		tx.ID, tx.Reference, tx.SenderID, tx.ReceiverID, tx.SenderWalletID, tx.ReceiverWalletID,
-		tx.Amount, tx.Currency, tx.ExchangeRate, tx.ConvertedAmount, tx.ConvertedCurrency,
-		tx.FeeAmount, tx.FeeCurrency, tx.Status, tx.StatusReason, tx.TransactionType,
-		tx.Channel, tx.Category, tx.Description, tx.Metadata, tx.BlockchainTxHash,
-		tx.SettlementID, tx.InitiatedAt, tx.CompletedAt, tx.CreatedAt, tx.UpdatedAt,
-	)
+    _, err := r.db.ExecContext(ctx, query,
+        tx.ID, tx.Reference, tx.SenderID, tx.ReceiverID, tx.SenderWalletID, tx.ReceiverWalletID,
+        tx.Amount, tx.Currency, tx.ExchangeRate, tx.ConvertedAmount, tx.ConvertedCurrency,
+        tx.FeeAmount, tx.FeeCurrency, tx.NetAmount, tx.Status, tx.StatusReason, tx.TransactionType,
+        tx.Channel, tx.Category, tx.Description, tx.Metadata, tx.BlockchainTxHash,
+        tx.SettlementID, tx.InitiatedAt, tx.CompletedAt, tx.CreatedAt, tx.UpdatedAt,
+    )
 
-	return errors.Wrap(err, "failed to create transaction")
+    return errors.Wrap(err, "failed to create transaction")
 }
 
 func (r *TransactionRepository) Update(ctx context.Context, tx *domain.Transaction) error {
@@ -286,8 +286,17 @@ func (r *TransactionRepository) Update(ctx context.Context, tx *domain.Transacti
 }
 
 func (r *TransactionRepository) FindByID(ctx context.Context, id uuid.UUID) (*domain.Transaction, error) {
-	var tx domain.Transaction
-	query := `SELECT * FROM transactions WHERE id = $1`
+    var tx domain.Transaction
+    query := `
+        SELECT 
+            id, reference, sender_id, receiver_id, sender_wallet_id, receiver_wallet_id,
+            amount, currency, exchange_rate, converted_amount, converted_currency,
+            fee_amount, fee_currency, COALESCE(net_amount, converted_amount) AS net_amount,
+            status, status_reason, transaction_type, channel, category, description,
+            metadata, blockchain_tx_hash, settlement_id, initiated_at, completed_at,
+            created_at, updated_at
+        FROM transactions WHERE id = $1
+    `
 
 	err := r.db.GetContext(ctx, &tx, query, id)
 	if err == sql.ErrNoRows {
@@ -301,8 +310,17 @@ func (r *TransactionRepository) FindByID(ctx context.Context, id uuid.UUID) (*do
 }
 
 func (r *TransactionRepository) FindByReference(ctx context.Context, ref string) (*domain.Transaction, error) {
-	var tx domain.Transaction
-	query := `SELECT * FROM transactions WHERE reference = $1`
+    var tx domain.Transaction
+    query := `
+        SELECT 
+            id, reference, sender_id, receiver_id, sender_wallet_id, receiver_wallet_id,
+            amount, currency, exchange_rate, converted_amount, converted_currency,
+            fee_amount, fee_currency, COALESCE(net_amount, converted_amount) AS net_amount,
+            status, status_reason, transaction_type, channel, category, description,
+            metadata, blockchain_tx_hash, settlement_id, initiated_at, completed_at,
+            created_at, updated_at
+        FROM transactions WHERE reference = $1
+    `
 
 	err := r.db.GetContext(ctx, &tx, query, ref)
 	if err == sql.ErrNoRows {
@@ -316,13 +334,20 @@ func (r *TransactionRepository) FindByReference(ctx context.Context, ref string)
 }
 
 func (r *TransactionRepository) FindByUserID(ctx context.Context, userID uuid.UUID, limit, offset int) ([]*domain.Transaction, error) {
-	var txs []*domain.Transaction
-	query := `
-		SELECT * FROM transactions 
-		WHERE sender_id = $1 OR receiver_id = $1
-		ORDER BY created_at DESC
-		LIMIT $2 OFFSET $3
-	`
+    var txs []*domain.Transaction
+    query := `
+        SELECT 
+            id, reference, sender_id, receiver_id, sender_wallet_id, receiver_wallet_id,
+            amount, currency, exchange_rate, converted_amount, converted_currency,
+            fee_amount, fee_currency, COALESCE(net_amount, converted_amount) AS net_amount,
+            status, status_reason, transaction_type, channel, category, description,
+            metadata, blockchain_tx_hash, settlement_id, initiated_at, completed_at,
+            created_at, updated_at
+        FROM transactions 
+        WHERE sender_id = $1 OR receiver_id = $1
+        ORDER BY created_at DESC
+        LIMIT $2 OFFSET $3
+    `
 
 	err := r.db.SelectContext(ctx, &txs, query, userID, limit, offset)
 	if err != nil {
@@ -333,13 +358,20 @@ func (r *TransactionRepository) FindByUserID(ctx context.Context, userID uuid.UU
 }
 
 func (r *TransactionRepository) FindPendingSettlement(ctx context.Context, limit int) ([]*domain.Transaction, error) {
-	var txs []*domain.Transaction
-	query := `
-		SELECT * FROM transactions 
-		WHERE status = 'completed' AND settlement_id IS NULL
-		ORDER BY completed_at ASC
-		LIMIT $1
-	`
+    var txs []*domain.Transaction
+    query := `
+        SELECT 
+            id, reference, sender_id, receiver_id, sender_wallet_id, receiver_wallet_id,
+            amount, currency, exchange_rate, converted_amount, converted_currency,
+            fee_amount, fee_currency, COALESCE(net_amount, converted_amount) AS net_amount,
+            status, status_reason, transaction_type, channel, category, description,
+            metadata, blockchain_tx_hash, settlement_id, initiated_at, completed_at,
+            created_at, updated_at
+        FROM transactions 
+        WHERE status = 'completed' AND settlement_id IS NULL
+        ORDER BY completed_at ASC
+        LIMIT $1
+    `
 
 	err := r.db.SelectContext(ctx, &txs, query, limit)
 	if err != nil {

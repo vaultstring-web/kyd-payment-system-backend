@@ -56,16 +56,23 @@ func NewGateway(log logger.Logger) *Gateway {
 }
 
 func createReverseProxy(target string) *httputil.ReverseProxy {
-	url, _ := url.Parse(target)
-	return httputil.NewSingleHostReverseProxy(url)
+    url, _ := url.Parse(target)
+    rp := httputil.NewSingleHostReverseProxy(url)
+    rp.ModifyResponse = func(resp *http.Response) error {
+        // Remove upstream CORS headers to avoid duplicates; router middleware sets ours.
+        h := resp.Header
+        h.Del("Access-Control-Allow-Origin")
+        h.Del("Access-Control-Allow-Credentials")
+        h.Del("Access-Control-Allow-Headers")
+        h.Del("Access-Control-Allow-Methods")
+        h.Del("Access-Control-Expose-Headers")
+        return nil
+    }
+    return rp
 }
 
 func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-    // CORS headers for browser clients
-    w.Header().Set("Access-Control-Allow-Origin", "*")
-    w.Header().Set("Access-Control-Allow-Methods", "GET,POST,PUT,PATCH,DELETE,OPTIONS")
-    w.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type, X-Requested-With")
-    w.Header().Set("Access-Control-Expose-Headers", "Content-Length, Content-Type")
+    // Preflight handled by global CORS middleware on the router
     if r.Method == http.MethodOptions {
         w.WriteHeader(http.StatusNoContent)
         return
@@ -124,9 +131,16 @@ func main() {
     // Global CORS middleware
     r.Use(func(next http.Handler) http.Handler {
         return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-            w.Header().Set("Access-Control-Allow-Origin", "*")
+            origin := r.Header.Get("Origin")
+            if origin != "" {
+                w.Header().Set("Access-Control-Allow-Origin", origin)
+                w.Header().Set("Vary", "Origin")
+                w.Header().Set("Access-Control-Allow-Credentials", "true")
+            } else {
+                w.Header().Set("Access-Control-Allow-Origin", "*")
+            }
             w.Header().Set("Access-Control-Allow-Methods", "GET,POST,PUT,PATCH,DELETE,OPTIONS")
-            w.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type, X-Requested-With")
+            w.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type, X-Requested-With, Accept")
             w.Header().Set("Access-Control-Expose-Headers", "Content-Length, Content-Type")
             if r.Method == http.MethodOptions {
                 w.WriteHeader(http.StatusNoContent)

@@ -84,14 +84,15 @@ Write-Output "Ports: auth=$($env:AUTH_PORT) payment=$($env:PAYMENT_PORT) forex=$
 
 if (-not (Test-Path logs)) { New-Item -ItemType Directory -Path logs | Out-Null }
 
-# Define services to start (use compiled executables in build/ for reliability)
+# Define services to start
+# Prefer compiled executables in build/. If missing, fall back to `go run`.
 $services = @(
-    @{ name='auth'; cmd='.\\build\\auth.exe'; port=$env:AUTH_PORT },
-    @{ name='wallet'; cmd='.\\build\\wallet.exe'; port=$env:WALLET_PORT },
-    @{ name='forex'; cmd='.\\build\\forex.exe'; port=$env:FOREX_PORT },
-    @{ name='payment'; cmd='.\\build\\payment.exe'; port=$env:PAYMENT_PORT },
-    @{ name='settlement'; cmd='.\\build\\settlement.exe'; port=$env:SETTLEMENT_PORT },
-    @{ name='gateway'; cmd='.\\build\\gateway.exe'; port=$env:GATEWAY_PORT }
+    @{ name='auth'; cmd='.\\build\\auth.exe'; fallback='go run .\\cmd\\auth'; port=$env:AUTH_PORT },
+    @{ name='wallet'; cmd='.\\build\\wallet.exe'; fallback='go run .\\cmd\\wallet'; port=$env:WALLET_PORT },
+    @{ name='forex'; cmd='.\\build\\forex.exe'; fallback='go run .\\cmd\\forex'; port=$env:FOREX_PORT },
+    @{ name='payment'; cmd='.\\build\\payment.exe'; fallback='go run .\\cmd\\payment'; port=$env:PAYMENT_PORT },
+    @{ name='settlement'; cmd='.\\build\\settlement.exe'; fallback='go run .\\cmd\\settlement'; port=$env:SETTLEMENT_PORT },
+    @{ name='gateway'; cmd='.\\build\\gateway.exe'; fallback='go run .\\cmd\\gateway'; port=$env:GATEWAY_PORT }
 )
 
 function Start-MonitoredService {
@@ -102,28 +103,60 @@ function Start-MonitoredService {
     $logFile = Join-Path $repoRoot "logs\$($name).log"
 
     Start-Job -Name "svc-$name" -ScriptBlock {
-        param($repoRoot, $svc, $port, $logFile, $DATABASE_URL, $REDIS_URL, $JWT_SECRET, $name)
+        param($repoRoot, $svc, $port, $logFile, $DATABASE_URL, $REDIS_URL, $JWT_SECRET, $name, $authPort, $paymentPort, $walletPort, $forexPort, $settlementPort)
         
         while ($true) {
             try {
                 $ts = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
                 Add-Content -Path $logFile -Value "`n===== [$ts] START ====="
                 
-                # Set environment variables for this job's process before starting the service
+                Set-Location $repoRoot
+
+                # Set core env vars in this job process so child inherits them
                 $env:DATABASE_URL = $DATABASE_URL
                 $env:REDIS_URL    = $REDIS_URL
                 $env:JWT_SECRET   = $JWT_SECRET
                 $env:SERVER_PORT  = $port
 
-                # Start the service executable directly, redirecting output to the log file
+                # Gateway service targets (always localhost so VaultString works with http://localhost:9000)
+                if ($name -eq 'gateway') {
+                  $authUrl       = "http://127.0.0.1:$authPort"
+                  $paymentUrl    = "http://127.0.0.1:$paymentPort"
+                  $walletUrl     = "http://127.0.0.1:$walletPort"
+                  $forexUrl      = "http://127.0.0.1:$forexPort"
+                  $settlementUrl = "http://127.0.0.1:$settlementPort"
+
+                  $env:AUTH_SERVICE_URL       = $authUrl
+                  $env:PAYMENT_SERVICE_URL    = $paymentUrl
+                  $env:WALLET_SERVICE_URL     = $walletUrl
+                  $env:FOREX_SERVICE_URL      = $forexUrl
+                  $env:SETTLEMENT_SERVICE_URL = $settlementUrl
+                }
+
+                # Resolve command with fallback when build exe is missing
+                $cmdToRun = $svc.cmd
+                $isExe = Test-Path $cmdToRun
+                $exe = $null
+                $args = @()
+                if ($isExe) {
+                    $exe = $cmdToRun
+                    $args = @()
+                } else {
+                    # Use 'go run ./cmd/<service>' as fallback
+                    $exe = 'go'
+                    $args = @('run', "./cmd/$name")
+                }
+
                 try {
-                    Set-Location $repoRoot
-                    $exePath = $svc.cmd
-                    # Run synchronously in the background job, append all streams to the log file
-                    & $exePath *>> $logFile 2>&1
+                    $argsString = ($args -join ' ')
+                    if ([string]::IsNullOrWhiteSpace($argsString)) {
+                        & $exe *> $logFile
+                    } else {
+                        & $exe @args *> $logFile
+                    }
                 } catch {
                     $err = $_.Exception.Message
-                    Add-Content -Path $logFile -Value "===== ERROR: Failed to start $($exePath): $err ====="
+                    Add-Content -Path $logFile -Value ("===== ERROR: Failed to start {0}: {1} =====" -f $name, $err)
                 }
 
                 $exitTs = Get-Date -Format 'yyyy-MM-dd HH:mm:ss'
@@ -134,7 +167,7 @@ function Start-MonitoredService {
             }
             Start-Sleep -Seconds 2
         }
-    } -ArgumentList @($repoRoot, $svc, $port, $logFile, $env:DATABASE_URL, $env:REDIS_URL, $env:JWT_SECRET, $name) | Out-Null
+    } -ArgumentList @($repoRoot, $svc, $port, $logFile, $env:DATABASE_URL, $env:REDIS_URL, $env:JWT_SECRET, $name, $env:AUTH_PORT, $env:PAYMENT_PORT, $env:WALLET_PORT, $env:FOREX_PORT, $env:SETTLEMENT_PORT) | Out-Null
     
     Write-Output "Started monitor for $name -> $logFile"
 }

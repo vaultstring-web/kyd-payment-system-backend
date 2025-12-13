@@ -2,19 +2,20 @@
 package handler
 
 import (
-	"encoding/json"
-	"fmt"
-	"io"
-	"net/http"
-	"strconv"
+    "encoding/json"
+    "fmt"
+    "io"
+    "net/http"
+    "strconv"
 
-	"kyd/internal/payment"
-	"kyd/pkg/errors"
-	"kyd/pkg/logger"
-	"kyd/pkg/validator"
+    "kyd/internal/middleware"
+    "kyd/internal/payment"
+    "kyd/pkg/errors"
+    "kyd/pkg/logger"
+    "kyd/pkg/validator"
 
-	"github.com/google/uuid"
-	"github.com/gorilla/mux"
+    "github.com/google/uuid"
+    "github.com/gorilla/mux"
 )
 
 // PaymentHandler manages payment-related endpoints.
@@ -80,12 +81,12 @@ func (h *PaymentHandler) decodeInitiatePaymentRequest(w http.ResponseWriter, r *
 		return req, uuid.Nil, err
 	}
 
-	userID, ok := r.Context().Value("user_id").(uuid.UUID)
-	if !ok {
-		h.respondError(w, http.StatusUnauthorized, "Unauthorized")
-		return req, uuid.Nil, fmt.Errorf("unauthorized")
-	}
-	req.SenderID = userID
+    userID, ok := middleware.UserIDFromContext(r.Context())
+    if !ok {
+        h.respondError(w, http.StatusUnauthorized, "Unauthorized")
+        return req, uuid.Nil, fmt.Errorf("unauthorized")
+    }
+    req.SenderID = userID
 
 	if err := h.validator.Validate(&req); err != nil {
 		h.respondError(w, http.StatusBadRequest, err.Error())
@@ -116,22 +117,22 @@ func (h *PaymentHandler) GetTransaction(w http.ResponseWriter, r *http.Request) 
 	}
 
 	// Verify user has access to this transaction
-	userID, _ := r.Context().Value("user_id").(uuid.UUID)
-	if tx.SenderID != userID && tx.ReceiverID != userID {
-		h.respondError(w, http.StatusForbidden, "Access denied")
-		return
-	}
+    userID, _ := middleware.UserIDFromContext(r.Context())
+    if tx.SenderID != userID && tx.ReceiverID != userID {
+        h.respondError(w, http.StatusForbidden, "Access denied")
+        return
+    }
 
 	h.respondJSON(w, http.StatusOK, tx)
 }
 
 // GetUserTransactions lists transactions for the authenticated user.
 func (h *PaymentHandler) GetUserTransactions(w http.ResponseWriter, r *http.Request) {
-	userID, ok := r.Context().Value("user_id").(uuid.UUID)
-	if !ok {
-		h.respondError(w, http.StatusUnauthorized, "Unauthorized")
-		return
-	}
+    userID, ok := middleware.UserIDFromContext(r.Context())
+    if !ok {
+        h.respondError(w, http.StatusUnauthorized, "Unauthorized")
+        return
+    }
 
 	limit, offset := parsePagination(r)
 
@@ -158,12 +159,12 @@ func (h *PaymentHandler) CancelPayment(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	userID, _ := r.Context().Value("user_id").(uuid.UUID)
+    userID, _ := middleware.UserIDFromContext(r.Context())
 
-	if err := h.service.CancelTransaction(r.Context(), txID, userID); err != nil {
-		h.respondError(w, http.StatusBadRequest, err.Error())
-		return
-	}
+    if err := h.service.CancelTransaction(r.Context(), txID, userID); err != nil {
+        h.respondError(w, http.StatusBadRequest, err.Error())
+        return
+    }
 
 	h.respondJSON(w, http.StatusOK, map[string]string{
 		"message": "Transaction cancelled successfully",
@@ -187,8 +188,8 @@ func (h *PaymentHandler) BulkPayment(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	userID, _ := r.Context().Value("user_id").(uuid.UUID)
-	req.SenderID = userID
+    userID, _ := middleware.UserIDFromContext(r.Context())
+    req.SenderID = userID
 
 	if err := h.validator.Validate(&req); err != nil {
 		h.respondError(w, http.StatusBadRequest, err.Error())

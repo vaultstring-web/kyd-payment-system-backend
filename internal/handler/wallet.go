@@ -2,15 +2,16 @@
 package handler
 
 import (
-	"encoding/json"
-	"io"
-	"net/http"
+    "encoding/json"
+    "io"
+    "net/http"
 
-	"github.com/google/uuid"
-	"github.com/gorilla/mux"
-	"kyd/internal/wallet"
-	"kyd/pkg/logger"
-	"kyd/pkg/validator"
+    "github.com/google/uuid"
+    "github.com/gorilla/mux"
+    "kyd/internal/middleware"
+    "kyd/internal/wallet"
+    "kyd/pkg/logger"
+    "kyd/pkg/validator"
 )
 
 // WalletHandler manages wallet endpoints.
@@ -92,11 +93,11 @@ func (h *WalletHandler) GetWallet(w http.ResponseWriter, r *http.Request) {
 
 // GetUserWallets lists wallets for the authenticated user.
 func (h *WalletHandler) GetUserWallets(w http.ResponseWriter, r *http.Request) {
-	userID, ok := r.Context().Value("user_id").(uuid.UUID)
-	if !ok {
-		h.respondError(w, http.StatusUnauthorized, "Unauthorized")
-		return
-	}
+    userID, ok := middleware.UserIDFromContext(r.Context())
+    if !ok {
+        h.respondError(w, http.StatusUnauthorized, "Unauthorized")
+        return
+    }
 
 	wallets, err := h.service.GetUserWallets(r.Context(), userID)
 	if err != nil {
