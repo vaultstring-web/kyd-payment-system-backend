@@ -108,7 +108,10 @@ func (h *ForexHandler) WebSocketHandler(w http.ResponseWriter, r *http.Request) 
 func (h *ForexHandler) respondJSON(w http.ResponseWriter, status int, data interface{}) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
-	json.NewEncoder(w).Encode(data)
+	if err := json.NewEncoder(w).Encode(data); err != nil {
+		h.logger.Error("json encode failed", map[string]interface{}{"error": err.Error()})
+		_, _ = w.Write([]byte(`{"error":"response encoding failed"}`))
+	}
 }
 
 func (h *ForexHandler) respondError(w http.ResponseWriter, status int, message string) {

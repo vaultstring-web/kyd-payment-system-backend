@@ -5,6 +5,7 @@ package wallet
 
 import (
 	"context"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -15,14 +16,16 @@ import (
 )
 
 type Service struct {
-	repo   Repository
-	logger logger.Logger
+	repo     Repository
+	userRepo UserRepository
+	logger   logger.Logger
 }
 
-func NewService(repo Repository, log logger.Logger) *Service {
+func NewService(repo Repository, userRepo UserRepository, log logger.Logger) *Service {
 	return &Service{
-		repo:   repo,
-		logger: log,
+		repo:     repo,
+		userRepo: userRepo,
+		logger:   log,
 	}
 }
 
@@ -37,6 +40,25 @@ func (s *Service) CreateWallet(ctx context.Context, req *CreateWalletRequest) (*
 	existing, err := s.repo.FindByUserAndCurrency(ctx, req.UserID, req.Currency)
 	if err == nil && existing != nil {
 		return nil, errors.ErrWalletAlreadyExists
+	}
+
+	// Enforce country-specific currency restrictions
+	user, err := s.userRepo.FindByID(ctx, req.UserID)
+	if err != nil {
+		return nil, errors.Wrap(err, "failed to load user for wallet creation")
+	}
+	cc := strings.ToUpper(strings.TrimSpace(user.CountryCode))
+	switch cc {
+	case "CN":
+		if req.Currency != domain.CNY {
+			return nil, errors.ErrCurrencyNotAllowed
+		}
+	case "MW":
+		if req.Currency != domain.MWK {
+			return nil, errors.ErrCurrencyNotAllowed
+		}
+	default:
+		// For other countries, allow current behavior (no restriction)
 	}
 
 	wallet := &domain.Wallet{
@@ -103,4 +125,8 @@ type Repository interface {
 	FindByUserAndCurrency(ctx context.Context, userID uuid.UUID, currency domain.Currency) (*domain.Wallet, error)
 	DebitWallet(ctx context.Context, walletID uuid.UUID, amount decimal.Decimal) error
 	CreditWallet(ctx context.Context, walletID uuid.UUID, amount decimal.Decimal) error
+}
+
+type UserRepository interface {
+	FindByID(ctx context.Context, id uuid.UUID) (*domain.User, error)
 }

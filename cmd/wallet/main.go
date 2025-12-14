@@ -70,9 +70,10 @@ func main() {
 
 	// Initialize repositories
 	walletRepo := postgres.NewWalletRepository(db)
+	userRepo := postgres.NewUserRepository(db)
 
 	// Initialize services
-	walletService := wallet.NewService(walletRepo, log)
+	walletService := wallet.NewService(walletRepo, userRepo, log)
 
 	// Initialize handlers
 	val := validator.New()
@@ -83,8 +84,11 @@ func main() {
 
 	// Middleware
 	r.Use(middleware.CORS)
+	r.Use(middleware.SecurityHeaders)
+	r.Use(middleware.Recovery)
 	r.Use(middleware.CorrelationID)
 	r.Use(middleware.NewLoggingMiddleware(log).Log)
+	r.Use(middleware.BodyLimit(1 << 20)) // 1MB global cap
 	r.Use(middleware.NewRateLimiter(redisClient, 120, time.Minute).Limit)
 
 	authMW := middleware.NewAuthMiddleware(cfg.JWT.Secret)

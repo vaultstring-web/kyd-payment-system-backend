@@ -93,8 +93,9 @@ func (s *Service) InitiatePayment(ctx context.Context, req *InitiatePaymentReque
 		if err != nil {
 			return nil, pkgerrors.Wrap(err, "failed to get exchange rate")
 		}
-		exchangeRate = rate.Rate
-		convertedAmount = req.Amount.Mul(exchangeRate)
+		// Use sell rate for conversion (sender sells base currency)
+		exchangeRate = rate.SellRate
+		convertedAmount = req.Amount.Mul(rate.SellRate)
 		convertedCurrency = receiverWallet.Currency
 	}
 

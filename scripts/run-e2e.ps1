@@ -30,7 +30,7 @@ function Set-EnvFromFile {
         $parts = $_ -split '=', 2
         $k = $parts[0].Trim()
         $v = $parts[1].Trim()
-        if ($k -ne '') { $env:$k = $v }
+        if ($k -ne '') { Set-Item -Path Env:$k -Value $v }
     }
 }
 
@@ -39,6 +39,17 @@ Set-Location $repoRoot
 
 # Load .env if present, otherwise .env.example
 if (Test-Path .env) { Write-Output "Loading .env"; Set-EnvFromFile -Path .env } else { Write-Output "Loading .env.example"; Set-EnvFromFile -Path .env.example }
+
+# Defaults for local dev if missing
+if (-not $env:DATABASE_URL) { $env:DATABASE_URL = 'postgres://kyd_user:kyd_password@localhost:5432/kyd_dev?sslmode=disable' }
+if (-not $env:REDIS_URL) { $env:REDIS_URL = 'localhost:6379' }
+if (-not $env:JWT_SECRET) { $env:JWT_SECRET = 'sk_dev_local' }
+if (-not $env:AUTH_PORT) { $env:AUTH_PORT = '3000' }
+if (-not $env:PAYMENT_PORT) { $env:PAYMENT_PORT = '3001' }
+if (-not $env:FOREX_PORT) { $env:FOREX_PORT = '3002' }
+if (-not $env:WALLET_PORT) { $env:WALLET_PORT = '3003' }
+if (-not $env:SETTLEMENT_PORT) { $env:SETTLEMENT_PORT = '3004' }
+if (-not $env:GATEWAY_PORT) { $env:GATEWAY_PORT = '9000' }
 
 # Convenience local variables
 $db = $env:DATABASE_URL
@@ -100,7 +111,8 @@ try {
 
     $paymentBody = @{ sender_id = $johnID; receiver_id = $wangID; amount = '1000'; currency = 'MWK'; description = 'E2E test MWK->CNY'; channel='mobile'; category='transfer' } | ConvertTo-Json
 
-    $resp = Invoke-RestMethod -Method Post -Uri "http://localhost:$($ports.gateway)/api/v1/payments/initiate" -ContentType 'application/json' -Headers @{ Authorization = "Bearer $tokenJohn" } -Body $paymentBody -ErrorAction Stop
+    $idemKey = "e2e-$([System.Guid]::NewGuid().ToString())-$([DateTime]::UtcNow.ToString('yyyyMMddHHmmss'))"
+    $resp = Invoke-RestMethod -Method Post -Uri "http://localhost:$($ports.gateway)/api/v1/payments/initiate" -ContentType 'application/json' -Headers @{ Authorization = "Bearer $tokenJohn"; 'Idempotency-Key' = $idemKey } -Body $paymentBody -ErrorAction Stop
     Write-Output "=== Payment Response ==="
     $resp | ConvertTo-Json -Depth 8 | Write-Output
 

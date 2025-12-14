@@ -2,16 +2,18 @@
 package handler
 
 import (
-    "encoding/json"
-    "io"
-    "net/http"
+	"encoding/json"
+	"io"
+	"net/http"
 
-    "github.com/google/uuid"
-    "github.com/gorilla/mux"
-    "kyd/internal/middleware"
-    "kyd/internal/wallet"
-    "kyd/pkg/logger"
-    "kyd/pkg/validator"
+	"kyd/internal/middleware"
+	"kyd/internal/wallet"
+	"kyd/pkg/errors"
+	"kyd/pkg/logger"
+	"kyd/pkg/validator"
+
+	"github.com/google/uuid"
+	"github.com/gorilla/mux"
 )
 
 // WalletHandler manages wallet endpoints.
@@ -62,6 +64,14 @@ func (h *WalletHandler) CreateWallet(w http.ResponseWriter, r *http.Request) {
 
 	wallet, err := h.service.CreateWallet(r.Context(), &req)
 	if err != nil {
+		if err == errors.ErrWalletAlreadyExists {
+			h.respondError(w, http.StatusConflict, "Wallet already exists for this currency")
+			return
+		}
+		if err == errors.ErrCurrencyNotAllowed {
+			h.respondError(w, http.StatusBadRequest, "Currency not allowed for your country")
+			return
+		}
 		h.logger.Error("Failed to create wallet", map[string]interface{}{
 			"error":   err.Error(),
 			"user_id": userID,
@@ -93,11 +103,11 @@ func (h *WalletHandler) GetWallet(w http.ResponseWriter, r *http.Request) {
 
 // GetUserWallets lists wallets for the authenticated user.
 func (h *WalletHandler) GetUserWallets(w http.ResponseWriter, r *http.Request) {
-    userID, ok := middleware.UserIDFromContext(r.Context())
-    if !ok {
-        h.respondError(w, http.StatusUnauthorized, "Unauthorized")
-        return
-    }
+	userID, ok := middleware.UserIDFromContext(r.Context())
+	if !ok {
+		h.respondError(w, http.StatusUnauthorized, "Unauthorized")
+		return
+	}
 
 	wallets, err := h.service.GetUserWallets(r.Context(), userID)
 	if err != nil {
@@ -148,7 +158,10 @@ func (h *WalletHandler) GetTransactionHistory(w http.ResponseWriter, r *http.Req
 func (h *WalletHandler) respondJSON(w http.ResponseWriter, status int, data interface{}) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)
-	json.NewEncoder(w).Encode(data)
+	if err := json.NewEncoder(w).Encode(data); err != nil {
+		h.logger.Error("json encode failed", map[string]interface{}{"error": err.Error()})
+		_, _ = w.Write([]byte(`{"error":"response encoding failed"}`))
+	}
 }
 
 func (h *WalletHandler) respondError(w http.ResponseWriter, status int, message string) {

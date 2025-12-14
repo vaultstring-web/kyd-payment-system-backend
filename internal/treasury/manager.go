@@ -385,8 +385,22 @@ func (tm *TreasuryManager) GetRiskMetrics() *RiskMetrics {
 	tm.riskMetrics.mu.RLock()
 	defer tm.riskMetrics.mu.RUnlock()
 
-	copy := *tm.riskMetrics
-	return &copy
+	m := tm.riskMetrics
+	out := &RiskMetrics{
+		VaR95:             m.VaR95,
+		VaR99:             m.VaR99,
+		ExpectedShortfall: m.ExpectedShortfall,
+		MaxDrawdown:       m.MaxDrawdown,
+		SharpeRatio:       m.SharpeRatio,
+		TotalExposure:     m.TotalExposure,
+		NetExposure:       m.NetExposure,
+		ConcentrationRisk: make(map[string]float64, len(m.ConcentrationRisk)),
+		LastCalculated:    m.LastCalculated,
+	}
+	for k, v := range m.ConcentrationRisk {
+		out.ConcentrationRisk[k] = v
+	}
+	return out
 }
 
 // CalculateConcentrationRisk calculates portfolio concentration.

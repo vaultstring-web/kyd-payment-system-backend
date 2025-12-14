@@ -18,6 +18,7 @@ import (
 
 	"kyd/internal/blockchain/ripple"
 	"kyd/internal/blockchain/stellar"
+	"kyd/internal/middleware"
 	"kyd/internal/repository/postgres"
 	"kyd/internal/settlement"
 	"kyd/pkg/config"
@@ -84,6 +85,14 @@ func main() {
 
 	// Setup router
 	r := mux.NewRouter()
+
+	// Middleware
+	r.Use(middleware.CORS)
+	r.Use(middleware.SecurityHeaders)
+	r.Use(middleware.Recovery)
+	r.Use(middleware.CorrelationID)
+	r.Use(middleware.NewLoggingMiddleware(log).Log)
+	r.Use(middleware.BodyLimit(1 << 20))
 
 	// Routes
 	r.HandleFunc("/health", healthCheck).Methods("GET")

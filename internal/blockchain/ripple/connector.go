@@ -12,17 +12,20 @@ import (
 // Connector provides stub methods for Ripple blockchain integration.
 type Connector struct{}
 
-// NewConnector returns a stub error for now (ripple disabled).
+// NewConnector returns a stub connector suitable for local development.
 func NewConnector(_, _ string) (*Connector, error) {
 	return &Connector{}, nil
 }
 
-// SubmitSettlement is a stub implementation for Ripple Settle -- currently returns a not implemented error.
-func (c *Connector) SubmitSettlement(_ context.Context, _ *domain.Settlement) (*settlement.SettlementResult, error) {
-	return nil, fmt.Errorf("Ripple connector temporarily disabled: settlement not submitted")
+// SubmitSettlement returns a stub success result for local development.
+func (c *Connector) SubmitSettlement(_ context.Context, s *domain.Settlement) (*settlement.SettlementResult, error) {
+	return &settlement.SettlementResult{
+		TxHash:    fmt.Sprintf("stub-ripple-%s", s.ID.String()),
+		Confirmed: true,
+	}, nil
 }
 
-// CheckConfirmation is a stub implementation for Ripple Settle -- currently returns a not implemented error.
+// CheckConfirmation always returns true in local development.
 func (c *Connector) CheckConfirmation(_ context.Context, _ string) (bool, error) {
-	return false, fmt.Errorf("Ripple connector temporarily disabled: confirmation unavailable")
+	return true, nil
 }

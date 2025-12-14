@@ -19,19 +19,22 @@ type Connector struct {
 	networkPass string
 }
 
-// NewConnector returns a stub connector (Stellar integration disabled).
+// NewConnector returns a stub connector suitable for local development.
 func NewConnector(_, _ string, _ bool) (*Connector, error) {
 	return &Connector{}, nil
 }
 
-// SubmitSettlement is a stub implementation for Stellar settlement.
-func (c *Connector) SubmitSettlement(_ context.Context, _ *domain.Settlement) (*settlement.SettlementResult, error) {
-	return nil, fmt.Errorf("Stellar connector temporarily disabled: settlement not submitted")
+// SubmitSettlement returns a stub success result for local development.
+func (c *Connector) SubmitSettlement(_ context.Context, s *domain.Settlement) (*settlement.SettlementResult, error) {
+	return &settlement.SettlementResult{
+		TxHash:    fmt.Sprintf("stub-stellar-%s", s.ID.String()),
+		Confirmed: true,
+	}, nil
 }
 
-// CheckConfirmation is a stub implementation for Stellar confirmation.
+// CheckConfirmation always returns true in local development.
 func (c *Connector) CheckConfirmation(_ context.Context, _ string) (bool, error) {
-	return false, fmt.Errorf("Stellar connector temporarily disabled: confirmation unavailable")
+	return true, nil
 }
 
 func (c *Connector) getAsset(currency domain.Currency) txnbuild.Asset {

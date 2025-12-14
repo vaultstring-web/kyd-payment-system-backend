@@ -96,14 +96,14 @@ func (r *UserRepository) Update(ctx context.Context, user *domain.User) error {
 		UPDATE users SET
 			email = $1, phone = $2, first_name = $3, last_name = $4,
 			user_type = $5, kyc_level = $6, kyc_status = $7, last_login = $8,
-			updated_at = $9
-		WHERE id = $10
+			password_hash = $9, updated_at = $10
+		WHERE id = $11
 	`
 
 	_, err := r.db.ExecContext(ctx, query,
 		user.Email, user.Phone, user.FirstName, user.LastName,
 		user.UserType, user.KYCLevel, user.KYCStatus, user.LastLogin,
-		user.UpdatedAt, user.ID,
+		user.PasswordHash, user.UpdatedAt, user.ID,
 	)
 
 	return errors.Wrap(err, "failed to update user")

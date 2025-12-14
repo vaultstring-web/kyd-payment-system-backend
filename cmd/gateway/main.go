@@ -4,20 +4,21 @@
 package main
 
 import (
-    "context"
-    "fmt"
-    "net/http"
-    "net/http/httputil"
-    "net/url"
-    "os"
-    "os/signal"
-    "syscall"
-    "time"
+	"context"
+	"fmt"
+	"net/http"
+	"net/http/httputil"
+	"net/url"
+	"os"
+	"os/signal"
+	"syscall"
+	"time"
 
-    "kyd/pkg/config"
-    "kyd/pkg/logger"
+	"kyd/internal/middleware"
+	"kyd/pkg/config"
+	"kyd/pkg/logger"
 
-    "github.com/gorilla/mux"
+	"github.com/gorilla/mux"
 )
 
 type Gateway struct {
@@ -30,53 +31,62 @@ type Gateway struct {
 }
 
 func NewGateway(log logger.Logger) *Gateway {
-    // Read target service URLs from environment, fall back to local defaults
-    authURL := getEnv("AUTH_SERVICE_URL", "http://localhost:3000")
-    paymentURL := getEnv("PAYMENT_SERVICE_URL", "http://localhost:3001")
-    walletURL := getEnv("WALLET_SERVICE_URL", "http://localhost:3003")
-    forexURL := getEnv("FOREX_SERVICE_URL", "http://localhost:3002")
-    settlementURL := getEnv("SETTLEMENT_SERVICE_URL", "http://localhost:3004")
+	// Read target service URLs from environment, fall back to local defaults
+	authURL := getEnv("AUTH_SERVICE_URL", "http://localhost:3000")
+	paymentURL := getEnv("PAYMENT_SERVICE_URL", "http://localhost:3001")
+	walletURL := getEnv("WALLET_SERVICE_URL", "http://localhost:3003")
+	forexURL := getEnv("FOREX_SERVICE_URL", "http://localhost:3002")
+	settlementURL := getEnv("SETTLEMENT_SERVICE_URL", "http://localhost:3004")
 
-    log.Info("Gateway service targets", map[string]interface{}{
-        "auth":       authURL,
-        "payment":    paymentURL,
-        "wallet":     walletURL,
-        "forex":      forexURL,
-        "settlement": settlementURL,
-    })
+	log.Info("Gateway service targets", map[string]interface{}{
+		"auth":       authURL,
+		"payment":    paymentURL,
+		"wallet":     walletURL,
+		"forex":      forexURL,
+		"settlement": settlementURL,
+	})
 
-    return &Gateway{
-        authProxy:       createReverseProxy(authURL),
-        paymentProxy:    createReverseProxy(paymentURL),
-        walletProxy:     createReverseProxy(walletURL),
-        forexProxy:      createReverseProxy(forexURL),
-        settlementProxy: createReverseProxy(settlementURL),
-        logger:          log,
-    }
+	return &Gateway{
+		authProxy:       createReverseProxy(authURL),
+		paymentProxy:    createReverseProxy(paymentURL),
+		walletProxy:     createReverseProxy(walletURL),
+		forexProxy:      createReverseProxy(forexURL),
+		settlementProxy: createReverseProxy(settlementURL),
+		logger:          log,
+	}
 }
 
 func createReverseProxy(target string) *httputil.ReverseProxy {
-    url, _ := url.Parse(target)
-    rp := httputil.NewSingleHostReverseProxy(url)
-    rp.ModifyResponse = func(resp *http.Response) error {
-        // Remove upstream CORS headers to avoid duplicates; router middleware sets ours.
-        h := resp.Header
-        h.Del("Access-Control-Allow-Origin")
-        h.Del("Access-Control-Allow-Credentials")
-        h.Del("Access-Control-Allow-Headers")
-        h.Del("Access-Control-Allow-Methods")
-        h.Del("Access-Control-Expose-Headers")
-        return nil
-    }
-    return rp
+	u, err := url.Parse(target)
+	if err != nil || u.Scheme == "" || u.Host == "" {
+		director := func(req *http.Request) {}
+		rp := &httputil.ReverseProxy{Director: director}
+		rp.ErrorHandler = func(w http.ResponseWriter, r *http.Request, e error) {
+			w.WriteHeader(http.StatusBadGateway)
+			_, _ = w.Write([]byte(`{"error":"invalid upstream configuration"}`))
+		}
+		return rp
+	}
+	rp := httputil.NewSingleHostReverseProxy(u)
+	rp.ModifyResponse = func(resp *http.Response) error {
+		// Remove upstream CORS headers to avoid duplicates; router middleware sets ours.
+		h := resp.Header
+		h.Del("Access-Control-Allow-Origin")
+		h.Del("Access-Control-Allow-Credentials")
+		h.Del("Access-Control-Allow-Headers")
+		h.Del("Access-Control-Allow-Methods")
+		h.Del("Access-Control-Expose-Headers")
+		return nil
+	}
+	return rp
 }
 
 func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-    // Preflight handled by global CORS middleware on the router
-    if r.Method == http.MethodOptions {
-        w.WriteHeader(http.StatusNoContent)
-        return
-    }
+	// Preflight handled by global CORS middleware on the router
+	if r.Method == http.MethodOptions {
+		w.WriteHeader(http.StatusNoContent)
+		return
+	}
 	// Log request
 	g.logger.Info("Gateway request", map[string]interface{}{
 		"method": r.Method,
@@ -106,14 +116,14 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 }
 
 func matchPath(path, prefix string) bool {
-    return len(path) >= len(prefix) && path[:len(prefix)] == prefix
+	return len(path) >= len(prefix) && path[:len(prefix)] == prefix
 }
 
 func getEnv(key, def string) string {
-    if v := os.Getenv(key); v != "" {
-        return v
-    }
-    return def
+	if v := os.Getenv(key); v != "" {
+		return v
+	}
+	return def
 }
 
 func main() {
@@ -126,29 +136,15 @@ func main() {
 
 	gateway := NewGateway(log)
 
-    r := mux.NewRouter()
+	r := mux.NewRouter()
 
-    // Global CORS middleware
-    r.Use(func(next http.Handler) http.Handler {
-        return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-            origin := r.Header.Get("Origin")
-            if origin != "" {
-                w.Header().Set("Access-Control-Allow-Origin", origin)
-                w.Header().Set("Vary", "Origin")
-                w.Header().Set("Access-Control-Allow-Credentials", "true")
-            } else {
-                w.Header().Set("Access-Control-Allow-Origin", "*")
-            }
-            w.Header().Set("Access-Control-Allow-Methods", "GET,POST,PUT,PATCH,DELETE,OPTIONS")
-            w.Header().Set("Access-Control-Allow-Headers", "Authorization, Content-Type, X-Requested-With, Accept")
-            w.Header().Set("Access-Control-Expose-Headers", "Content-Length, Content-Type")
-            if r.Method == http.MethodOptions {
-                w.WriteHeader(http.StatusNoContent)
-                return
-            }
-            next.ServeHTTP(w, r)
-        })
-    })
+	// Global middleware
+	r.Use(middleware.CORS)
+	r.Use(middleware.SecurityHeaders)
+	r.Use(middleware.Recovery)
+	r.Use(middleware.CorrelationID)
+	r.Use(middleware.NewLoggingMiddleware(log).Log)
+	r.Use(middleware.BodyLimit(1 << 20))
 
 	// Health check
 	r.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {

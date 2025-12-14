@@ -5,7 +5,7 @@ param(
     [string]$AuthPort = "3000",
     [string]$PaymentPort = "3001",
     [string]$ForexPort = "3002",
-    [string]$WalletPort = "3003",
+    [string]$WalletPort = "9001",
     [string]$GatewayPort = "9000"
 )
 

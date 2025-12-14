@@ -87,9 +87,12 @@ func main() {
 
 	// Middleware
 	r.Use(middleware.CORS)
+	r.Use(middleware.SecurityHeaders)
+	r.Use(middleware.Recovery)
 	r.Use(middleware.CorrelationID)
 	r.Use(middleware.NewLoggingMiddleware(log).Log)
-	r.Use(middleware.NewRateLimiter(redisClient, 200, time.Minute).Limit)
+	r.Use(middleware.BodyLimit(1 << 20)) // 1MB global cap
+	r.Use(middleware.NewRateLimiter(redisClient, 100, time.Minute).Limit)
 
 	// Routes
 	r.HandleFunc("/health", healthCheck).Methods("GET")

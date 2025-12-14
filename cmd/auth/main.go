@@ -80,6 +80,9 @@ func main() {
 	r.Use(middleware.CorrelationID)
 	r.Use(middleware.NewLoggingMiddleware(log).Log)
 	r.Use(middleware.NewRateLimiter(redisClient, 60, time.Minute).Limit)
+	r.Use(middleware.SecurityHeaders)
+	r.Use(middleware.Recovery)
+	r.Use(middleware.BodyLimit(1 << 20))
 
 	// Routes
 	r.HandleFunc("/health", healthCheck).Methods("GET")

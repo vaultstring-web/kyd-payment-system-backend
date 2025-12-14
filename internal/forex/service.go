@@ -27,6 +27,7 @@ type Service struct {
 	logger    logger.Logger
 	mu        sync.RWMutex
 	rateCache map[string]*domain.ExchangeRate
+	spreadEngine *SpreadEngine
 }
 
 // NewService constructs a forex Service with repository, cache, providers, and logger.
@@ -37,7 +38,11 @@ func NewService(repo Repository, cache RateCache, providers []RateProvider, log 
 		providers: providers,
 		logger:    log,
 		rateCache: make(map[string]*domain.ExchangeRate),
+		spreadEngine: NewSpreadEngine(),
 	}
+
+	// Adjust liquidity levels for MWK to improve conversions
+	s.spreadEngine.SetLiquidity("MWK", 0.6)
 
 	// Start rate update worker
 	go s.startRateUpdater()
@@ -91,11 +96,11 @@ func (s *Service) fetchAndStoreRate(ctx context.Context, from, to domain.Currenc
 			continue
 		}
 
-		// Apply spread (1.5% default)
-		spread := decimal.NewFromFloat(0.015)
-		rate.BuyRate = rate.Rate.Mul(decimal.NewFromInt(1).Add(spread))
-		rate.SellRate = rate.Rate.Mul(decimal.NewFromInt(1).Sub(spread))
-		rate.Spread = spread
+		// Apply dynamic spread using spread engine
+		spreadRes := s.spreadEngine.CalculateSpread(string(from), string(to), rate.Rate)
+		rate.BuyRate = spreadRes.BuyRate
+		rate.SellRate = spreadRes.SellRate
+		rate.Spread = spreadRes.Spread
 		rate.ID = uuid.New()
 		rate.CreatedAt = time.Now()
 

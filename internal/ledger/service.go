@@ -97,7 +97,7 @@ func (s *Service) PostTransaction(ctx context.Context, posting *LedgerPosting) e
 	`,
 		uuid.New(), posting.TransactionID, posting.DebitWalletID,
 		posting.DebitAmount, posting.Currency,
-		uuid.New(), posting.TransactionID, posting.CreditWalletID,
+		uuid.New(), posting.CreditWalletID,
 		posting.CreditAmount, posting.ConvertedCurrency,
 	)
 

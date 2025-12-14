@@ -17,6 +17,7 @@ var (
 	ErrTransactionNotFound = errors.New("transaction not found")
 	ErrSettlementNotFound  = errors.New("settlement not found")
 	ErrRateNotAvailable    = errors.New("exchange rate not available")
+	ErrCurrencyNotAllowed  = errors.New("currency not allowed for user country")
 )
 
 // Wrap wraps an error with additional context
