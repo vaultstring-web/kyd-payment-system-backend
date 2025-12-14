@@ -235,6 +235,18 @@ func (r *WalletRepository) Update(ctx context.Context, wallet *domain.Wallet) er
 	return errors.Wrap(err, "failed to update wallet")
 }
 
+func (r *WalletRepository) Delete(ctx context.Context, id uuid.UUID) error {
+	query := `DELETE FROM wallets WHERE id = $1`
+	_, err := r.db.ExecContext(ctx, query, id)
+	return errors.Wrap(err, "failed to delete wallet")
+}
+
+func (r *WalletRepository) DeleteLedgerEntriesByWalletID(ctx context.Context, walletID uuid.UUID) error {
+	query := `DELETE FROM ledger_entries WHERE wallet_id = $1`
+	_, err := r.db.ExecContext(ctx, query, walletID)
+	return errors.Wrap(err, "failed to delete ledger entries by wallet")
+}
+
 // TRANSACTION REPOSITORY - internal/repository/postgres/transaction.go
 type TransactionRepository struct {
 	db *sqlx.DB
@@ -245,7 +257,7 @@ func NewTransactionRepository(db *sqlx.DB) *TransactionRepository {
 }
 
 func (r *TransactionRepository) Create(ctx context.Context, tx *domain.Transaction) error {
-    query := `
+	query := `
         INSERT INTO transactions (
             id, reference, sender_id, receiver_id, sender_wallet_id, receiver_wallet_id,
             amount, currency, exchange_rate, converted_amount, converted_currency,
@@ -258,15 +270,15 @@ func (r *TransactionRepository) Create(ctx context.Context, tx *domain.Transacti
         )
     `
 
-    _, err := r.db.ExecContext(ctx, query,
-        tx.ID, tx.Reference, tx.SenderID, tx.ReceiverID, tx.SenderWalletID, tx.ReceiverWalletID,
-        tx.Amount, tx.Currency, tx.ExchangeRate, tx.ConvertedAmount, tx.ConvertedCurrency,
-        tx.FeeAmount, tx.FeeCurrency, tx.NetAmount, tx.Status, tx.StatusReason, tx.TransactionType,
-        tx.Channel, tx.Category, tx.Description, tx.Metadata, tx.BlockchainTxHash,
-        tx.SettlementID, tx.InitiatedAt, tx.CompletedAt, tx.CreatedAt, tx.UpdatedAt,
-    )
+	_, err := r.db.ExecContext(ctx, query,
+		tx.ID, tx.Reference, tx.SenderID, tx.ReceiverID, tx.SenderWalletID, tx.ReceiverWalletID,
+		tx.Amount, tx.Currency, tx.ExchangeRate, tx.ConvertedAmount, tx.ConvertedCurrency,
+		tx.FeeAmount, tx.FeeCurrency, tx.NetAmount, tx.Status, tx.StatusReason, tx.TransactionType,
+		tx.Channel, tx.Category, tx.Description, tx.Metadata, tx.BlockchainTxHash,
+		tx.SettlementID, tx.InitiatedAt, tx.CompletedAt, tx.CreatedAt, tx.UpdatedAt,
+	)
 
-    return errors.Wrap(err, "failed to create transaction")
+	return errors.Wrap(err, "failed to create transaction")
 }
 
 func (r *TransactionRepository) Update(ctx context.Context, tx *domain.Transaction) error {
@@ -286,8 +298,8 @@ func (r *TransactionRepository) Update(ctx context.Context, tx *domain.Transacti
 }
 
 func (r *TransactionRepository) FindByID(ctx context.Context, id uuid.UUID) (*domain.Transaction, error) {
-    var tx domain.Transaction
-    query := `
+	var tx domain.Transaction
+	query := `
         SELECT 
             id, reference, sender_id, receiver_id, sender_wallet_id, receiver_wallet_id,
             amount, currency, exchange_rate, converted_amount, converted_currency,
@@ -310,8 +322,8 @@ func (r *TransactionRepository) FindByID(ctx context.Context, id uuid.UUID) (*do
 }
 
 func (r *TransactionRepository) FindByReference(ctx context.Context, ref string) (*domain.Transaction, error) {
-    var tx domain.Transaction
-    query := `
+	var tx domain.Transaction
+	query := `
         SELECT 
             id, reference, sender_id, receiver_id, sender_wallet_id, receiver_wallet_id,
             amount, currency, exchange_rate, converted_amount, converted_currency,
@@ -334,8 +346,8 @@ func (r *TransactionRepository) FindByReference(ctx context.Context, ref string)
 }
 
 func (r *TransactionRepository) FindByUserID(ctx context.Context, userID uuid.UUID, limit, offset int) ([]*domain.Transaction, error) {
-    var txs []*domain.Transaction
-    query := `
+	var txs []*domain.Transaction
+	query := `
         SELECT 
             id, reference, sender_id, receiver_id, sender_wallet_id, receiver_wallet_id,
             amount, currency, exchange_rate, converted_amount, converted_currency,
@@ -358,8 +370,8 @@ func (r *TransactionRepository) FindByUserID(ctx context.Context, userID uuid.UU
 }
 
 func (r *TransactionRepository) FindPendingSettlement(ctx context.Context, limit int) ([]*domain.Transaction, error) {
-    var txs []*domain.Transaction
-    query := `
+	var txs []*domain.Transaction
+	query := `
         SELECT 
             id, reference, sender_id, receiver_id, sender_wallet_id, receiver_wallet_id,
             amount, currency, exchange_rate, converted_amount, converted_currency,
@@ -391,4 +403,10 @@ func (r *TransactionRepository) FindBySettlementID(ctx context.Context, settleme
 	}
 
 	return txs, nil
+}
+
+func (r *TransactionRepository) DeleteByWalletID(ctx context.Context, walletID uuid.UUID) error {
+	query := `DELETE FROM transactions WHERE sender_wallet_id = $1 OR receiver_wallet_id = $1`
+	_, err := r.db.ExecContext(ctx, query, walletID)
+	return errors.Wrap(err, "failed to delete transactions by wallet")
 }

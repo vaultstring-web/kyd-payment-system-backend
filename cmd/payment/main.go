@@ -81,6 +81,7 @@ func main() {
 	txRepo := postgres.NewTransactionRepository(db)
 	walletRepo := postgres.NewWalletRepository(db)
 	forexRepo := postgres.NewForexRepository(db)
+	userRepo := postgres.NewUserRepository(db)
 
 	// Initialize services
 	ledgerService := ledger.NewService(db.DB)
@@ -94,7 +95,7 @@ func main() {
 	rateCache := forex.NewRedisRateCache(redisClient)
 	forexService := forex.NewService(forexRepo, rateCache, forexProviders, log)
 
-	paymentService := payment.NewService(txRepo, walletRepo, forexService, ledgerService, log)
+	paymentService := payment.NewService(txRepo, walletRepo, forexService, ledgerService, userRepo, log)
 
 	// Initialize handlers
 	val := validator.New()

@@ -5,14 +5,14 @@ package wallet
 
 import (
 	"context"
-	"strings"
 	"time"
 
-	"github.com/google/uuid"
-	"github.com/shopspring/decimal"
 	"kyd/internal/domain"
 	"kyd/pkg/errors"
 	"kyd/pkg/logger"
+
+	"github.com/google/uuid"
+	"github.com/shopspring/decimal"
 )
 
 type Service struct {
@@ -36,19 +36,12 @@ type CreateWalletRequest struct {
 
 // CreateWallet creates a new wallet for a user
 func (s *Service) CreateWallet(ctx context.Context, req *CreateWalletRequest) (*domain.Wallet, error) {
-	// Check if wallet already exists
-	existing, err := s.repo.FindByUserAndCurrency(ctx, req.UserID, req.Currency)
-	if err == nil && existing != nil {
-		return nil, errors.ErrWalletAlreadyExists
-	}
-
-	// Enforce country-specific currency restrictions
 	user, err := s.userRepo.FindByID(ctx, req.UserID)
 	if err != nil {
-		return nil, errors.Wrap(err, "failed to load user for wallet creation")
+		return nil, errors.Wrap(err, "failed to fetch user for wallet creation")
 	}
-	cc := strings.ToUpper(strings.TrimSpace(user.CountryCode))
-	switch cc {
+
+	switch user.CountryCode {
 	case "CN":
 		if req.Currency != domain.CNY {
 			return nil, errors.ErrCurrencyNotAllowed
@@ -58,7 +51,13 @@ func (s *Service) CreateWallet(ctx context.Context, req *CreateWalletRequest) (*
 			return nil, errors.ErrCurrencyNotAllowed
 		}
 	default:
-		// For other countries, allow current behavior (no restriction)
+		return nil, errors.ErrCurrencyNotAllowed
+	}
+
+	// Check if wallet already exists
+	existing, err := s.repo.FindByUserAndCurrency(ctx, req.UserID, req.Currency)
+	if err == nil && existing != nil {
+		return nil, errors.ErrWalletAlreadyExists
 	}
 
 	wallet := &domain.Wallet{

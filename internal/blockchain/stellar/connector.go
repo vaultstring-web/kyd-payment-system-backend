@@ -5,11 +5,12 @@ import (
 	"context"
 	"fmt"
 
+	"kyd/internal/domain"
+	"kyd/internal/settlement"
+
 	"github.com/stellar/go/clients/horizonclient"
 	"github.com/stellar/go/keypair"
 	"github.com/stellar/go/txnbuild"
-	"kyd/internal/domain"
-	"kyd/internal/settlement"
 )
 
 // Connector provides stub methods for Stellar blockchain integration.

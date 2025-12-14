@@ -47,11 +47,13 @@ func main() {
 
 	userRepo := postgres.NewUserRepository(db)
 	walletRepo := postgres.NewWalletRepository(db)
+	txRepo := postgres.NewTransactionRepository(db)
 	ctx := context.Background()
 
 	// Ensure John exists and has MWK wallet funded
 	johnID := ensureUser(ctx, userRepo, log, email, password, phone, first, last, country, domain.UserTypeIndividual, domain.KYCStatusVerified, 1)
 	ensureWallet(ctx, walletRepo, log, johnID, domain.MWK, decimal.NewFromInt(1_000_000))
+	purgeForeignCurrencyWallets(ctx, walletRepo, txRepo, log, johnID, domain.MWK)
 
 	// Ensure Wang exists and has CNY wallet funded
 	wEmail := getenv("SEED_WANG_EMAIL", "wang.wei@example.com")
@@ -62,6 +64,7 @@ func main() {
 	wCountry := getenv("SEED_WANG_COUNTRY", "CN")
 	wangID := ensureUser(ctx, userRepo, log, wEmail, wPass, wPhone, wFirst, wLast, wCountry, domain.UserTypeMerchant, domain.KYCStatusPending, 0)
 	ensureWallet(ctx, walletRepo, log, wangID, domain.CNY, decimal.NewFromInt(10_000))
+	purgeForeignCurrencyWallets(ctx, walletRepo, txRepo, log, wangID, domain.CNY)
 
 	fmt.Println("OK: users and wallets seeded")
 }
@@ -153,4 +156,28 @@ func ensureWallet(ctx context.Context, repo *postgres.WalletRepository, log logg
 		log.Fatal("Create wallet failed", map[string]interface{}{"error": err.Error()})
 	}
 	log.Info("Wallet created", map[string]interface{}{"user_id": userID, "currency": currency})
+}
+
+func purgeForeignCurrencyWallets(ctx context.Context, repo *postgres.WalletRepository, txRepo *postgres.TransactionRepository, log logger.Logger, userID uuid.UUID, allowed domain.Currency) {
+	wallets, err := repo.FindByUserID(ctx, userID)
+	if err != nil {
+		log.Error("Purge wallets: list failed", map[string]interface{}{"error": err.Error(), "user_id": userID})
+		return
+	}
+	for _, w := range wallets {
+		if w.Currency != allowed {
+			// Delete dependent rows to satisfy FK constraints
+			if err := repo.DeleteLedgerEntriesByWalletID(ctx, w.ID); err != nil {
+				log.Error("Purge wallets: delete ledger entries failed", map[string]interface{}{"error": err.Error(), "wallet_id": w.ID})
+			}
+			if err := txRepo.DeleteByWalletID(ctx, w.ID); err != nil {
+				log.Error("Purge wallets: delete transactions failed", map[string]interface{}{"error": err.Error(), "wallet_id": w.ID})
+			}
+			if err := repo.Delete(ctx, w.ID); err != nil {
+				log.Error("Purge wallets: delete failed", map[string]interface{}{"error": err.Error(), "wallet_id": w.ID})
+				continue
+			}
+			log.Info("Deleted non-home-currency wallet", map[string]interface{}{"user_id": userID, "currency": w.Currency})
+		}
+	}
 }

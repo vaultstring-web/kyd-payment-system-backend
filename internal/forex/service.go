@@ -21,23 +21,23 @@ import (
 
 // Service provides forex rate retrieval, caching, and conversion.
 type Service struct {
-	repo      Repository
-	cache     RateCache
-	providers []RateProvider
-	logger    logger.Logger
-	mu        sync.RWMutex
-	rateCache map[string]*domain.ExchangeRate
+	repo         Repository
+	cache        RateCache
+	providers    []RateProvider
+	logger       logger.Logger
+	mu           sync.RWMutex
+	rateCache    map[string]*domain.ExchangeRate
 	spreadEngine *SpreadEngine
 }
 
 // NewService constructs a forex Service with repository, cache, providers, and logger.
 func NewService(repo Repository, cache RateCache, providers []RateProvider, log logger.Logger) *Service {
 	s := &Service{
-		repo:      repo,
-		cache:     cache,
-		providers: providers,
-		logger:    log,
-		rateCache: make(map[string]*domain.ExchangeRate),
+		repo:         repo,
+		cache:        cache,
+		providers:    providers,
+		logger:       log,
+		rateCache:    make(map[string]*domain.ExchangeRate),
 		spreadEngine: NewSpreadEngine(),
 	}
 

@@ -27,6 +27,7 @@ type Service struct {
 	walletRepo    WalletRepository
 	forexService  ForexService
 	ledgerService LedgerService
+	userRepo      UserRepository
 	logger        logger.Logger
 }
 
@@ -35,6 +36,7 @@ func NewService(
 	walletRepo WalletRepository,
 	forexService ForexService,
 	ledgerService LedgerService,
+	userRepo UserRepository,
 	log logger.Logger,
 ) *Service {
 	return &Service{
@@ -42,6 +44,7 @@ func NewService(
 		walletRepo:    walletRepo,
 		forexService:  forexService,
 		ledgerService: ledgerService,
+		userRepo:      userRepo,
 		logger:        log,
 	}
 }
@@ -157,6 +160,10 @@ func (s *Service) InitiatePayment(ctx context.Context, req *InitiatePaymentReque
 		"reference":      tx.Reference,
 	})
 
+	if err := s.notifyReceiverTopUp(ctx, tx); err != nil {
+		s.logger.Warn("Notification failed", map[string]interface{}{"error": err.Error(), "transaction_id": tx.ID})
+	}
+
 	return &PaymentResponse{
 		Transaction: tx,
 		Message:     "Payment processed successfully",
@@ -236,6 +243,10 @@ type LedgerService interface {
 	PostTransaction(ctx context.Context, posting *ledger.LedgerPosting) error
 }
 
+type UserRepository interface {
+	FindByID(ctx context.Context, id uuid.UUID) (*domain.User, error)
+}
+
 func (s *Service) CancelTransaction(ctx context.Context, txID, userID uuid.UUID) error {
 	tx, err := s.repo.FindByID(ctx, txID)
 	if err != nil {
@@ -311,4 +322,25 @@ func (s *Service) BulkPayment(ctx context.Context, req *BulkPaymentRequest) (*Bu
 	}
 
 	return result, nil
+}
+
+func (s *Service) notifyReceiverTopUp(ctx context.Context, tx *domain.Transaction) error {
+	// Fetch receiver user
+	receiver, err := s.userRepo.FindByID(ctx, tx.ReceiverID)
+	if err != nil {
+		return err
+	}
+	// Only notify Chinese users receiving CNY
+	if receiver.CountryCode != "CN" || tx.ConvertedCurrency != domain.CNY {
+		return nil
+	}
+	s.logger.Info("Wallet top-up notification", map[string]interface{}{
+		"user_id":           receiver.ID,
+		"country_code":      receiver.CountryCode,
+		"wallet_id":         tx.ReceiverWalletID,
+		"amount_cny":        tx.ConvertedAmount.String(),
+		"transaction_ref":   tx.Reference,
+		"notification_type": "wallet_topup",
+	})
+	return nil
 }

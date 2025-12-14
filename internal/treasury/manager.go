@@ -15,12 +15,12 @@ import (
 
 // TreasuryManager handles treasury operations, liquidity, and risk management.
 type TreasuryManager struct {
-	mu              sync.RWMutex
-	positions       map[string]*TreasuryPosition
-	liquidityPools  map[string]*LiquidityPool
-	riskMetrics     *RiskMetrics
-	config          TreasuryConfig
-	alerts          chan Alert
+	mu             sync.RWMutex
+	positions      map[string]*TreasuryPosition
+	liquidityPools map[string]*LiquidityPool
+	riskMetrics    *RiskMetrics
+	config         TreasuryConfig
+	alerts         chan Alert
 }
 
 // TreasuryConfig holds configuration for treasury operations.
@@ -51,27 +51,27 @@ type TreasuryPosition struct {
 
 // LiquidityPool represents available liquidity in a currency.
 type LiquidityPool struct {
-	Currency      string          `json:"currency"`
-	Total         decimal.Decimal `json:"total"`
-	Available     decimal.Decimal `json:"available"`
-	Committed     decimal.Decimal `json:"committed"`
-	Reserved      decimal.Decimal `json:"reserved"`
-	MinRequired   decimal.Decimal `json:"min_required"`
-	LastUpdated   time.Time       `json:"last_updated"`
+	Currency    string          `json:"currency"`
+	Total       decimal.Decimal `json:"total"`
+	Available   decimal.Decimal `json:"available"`
+	Committed   decimal.Decimal `json:"committed"`
+	Reserved    decimal.Decimal `json:"reserved"`
+	MinRequired decimal.Decimal `json:"min_required"`
+	LastUpdated time.Time       `json:"last_updated"`
 }
 
 // RiskMetrics holds calculated risk measures.
 type RiskMetrics struct {
-	mu                 sync.RWMutex
-	VaR95              decimal.Decimal `json:"var_95"`
-	VaR99              decimal.Decimal `json:"var_99"`
-	ExpectedShortfall  decimal.Decimal `json:"expected_shortfall"`
-	MaxDrawdown        decimal.Decimal `json:"max_drawdown"`
-	SharpeRatio        float64         `json:"sharpe_ratio"`
-	TotalExposure      decimal.Decimal `json:"total_exposure"`
-	NetExposure        decimal.Decimal `json:"net_exposure"`
-	ConcentrationRisk  map[string]float64
-	LastCalculated     time.Time       `json:"last_calculated"`
+	mu                sync.RWMutex
+	VaR95             decimal.Decimal `json:"var_95"`
+	VaR99             decimal.Decimal `json:"var_99"`
+	ExpectedShortfall decimal.Decimal `json:"expected_shortfall"`
+	MaxDrawdown       decimal.Decimal `json:"max_drawdown"`
+	SharpeRatio       float64         `json:"sharpe_ratio"`
+	TotalExposure     decimal.Decimal `json:"total_exposure"`
+	NetExposure       decimal.Decimal `json:"net_exposure"`
+	ConcentrationRisk map[string]float64
+	LastCalculated    time.Time `json:"last_calculated"`
 }
 
 // StressScenario defines a stress test scenario.
@@ -83,10 +83,10 @@ type StressScenario struct {
 
 // Alert represents a treasury alert.
 type Alert struct {
-	ID        string    `json:"id"`
-	Type      string    `json:"type"`
-	Severity  string    `json:"severity"`
-	Message   string    `json:"message"`
+	ID        string `json:"id"`
+	Type      string `json:"type"`
+	Severity  string `json:"severity"`
+	Message   string `json:"message"`
 	Data      map[string]interface{}
 	Timestamp time.Time `json:"timestamp"`
 }
@@ -244,8 +244,8 @@ func (tm *TreasuryManager) RunStressTest(scenario StressScenario) StressTestResu
 	defer tm.mu.RUnlock()
 
 	result := StressTestResult{
-		ScenarioName: scenario.Name,
-		Timestamp:    time.Now(),
+		ScenarioName:     scenario.Name,
+		Timestamp:        time.Now(),
 		ImpactByCurrency: make(map[string]decimal.Decimal),
 	}
 
@@ -304,11 +304,11 @@ func (tm *TreasuryManager) UpdateLiquidity(currency string, total, available, co
 	// Check if below minimum
 	if available.LessThan(pool.MinRequired) {
 		tm.sendAlert(Alert{
-			ID:       uuid.New().String(),
-			Type:     "liquidity_warning",
-			Severity: "high",
-			Message:  fmt.Sprintf("Liquidity for %s below minimum requirement", currency),
-			Data:     map[string]interface{}{"currency": currency, "available": available.String(), "required": pool.MinRequired.String()},
+			ID:        uuid.New().String(),
+			Type:      "liquidity_warning",
+			Severity:  "high",
+			Message:   fmt.Sprintf("Liquidity for %s below minimum requirement", currency),
+			Data:      map[string]interface{}{"currency": currency, "available": available.String(), "required": pool.MinRequired.String()},
 			Timestamp: time.Now(),
 		})
 	}
