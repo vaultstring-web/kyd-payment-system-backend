@@ -76,7 +76,7 @@ func (h *WalletHandler) CreateWallet(w http.ResponseWriter, r *http.Request) {
 			"error":   err.Error(),
 			"user_id": userID,
 		})
-		h.respondError(w, http.StatusInternalServerError, err.Error())
+		h.respondError(w, http.StatusInternalServerError, "Failed to create wallet")
 		return
 	}
 

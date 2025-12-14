@@ -58,7 +58,7 @@ func (h *PaymentHandler) InitiatePayment(w http.ResponseWriter, r *http.Request)
 			return
 		}
 
-		h.respondError(w, http.StatusInternalServerError, err.Error())
+		h.respondError(w, http.StatusInternalServerError, "Payment failed")
 		return
 	}
 

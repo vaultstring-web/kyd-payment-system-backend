@@ -6,11 +6,12 @@ import (
 	"io"
 	"net/http"
 
-	"github.com/gorilla/mux"
 	"kyd/internal/domain"
 	"kyd/internal/forex"
 	"kyd/pkg/logger"
 	"kyd/pkg/validator"
+
+	"github.com/gorilla/mux"
 )
 
 // ForexHandler manages forex endpoints.
@@ -77,7 +78,8 @@ func (h *ForexHandler) Calculate(w http.ResponseWriter, r *http.Request) {
 
 	result, err := h.service.Calculate(r.Context(), &req)
 	if err != nil {
-		h.respondError(w, http.StatusInternalServerError, err.Error())
+		h.logger.Error("Forex calculate failed", map[string]interface{}{"error": err.Error()})
+		h.respondError(w, http.StatusInternalServerError, "Calculation failed")
 		return
 	}
 

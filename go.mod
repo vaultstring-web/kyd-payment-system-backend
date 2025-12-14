@@ -1,6 +1,6 @@
 module kyd
 
-go 1.24.11
+go 1.24.0
 
 require (
 	github.com/go-playground/validator/v10 v10.16.0
@@ -13,7 +13,6 @@ require (
 	github.com/redis/go-redis/v9 v9.4.0
 	github.com/shopspring/decimal v1.3.1
 	github.com/stellar/go v0.0.0-20251126222017-0fb88165e991
-	github.com/stretchr/testify v1.10.0
 	golang.org/x/crypto v0.45.0
 )
 
@@ -39,6 +38,7 @@ require (
 	github.com/sirupsen/logrus v1.9.3 // indirect
 	github.com/stellar/go-xdr v0.0.0-20231122183749-b53fb00bcac2 // indirect
 	github.com/stretchr/objx v0.5.2 // indirect
+	github.com/stretchr/testify v1.10.0 // indirect
 	go.uber.org/atomic v1.7.0 // indirect
 	golang.org/x/exp v0.0.0-20231006140011-7918f672742d // indirect
 	golang.org/x/net v0.47.0 // indirect
