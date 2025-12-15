@@ -138,20 +138,62 @@ func (s *Service) InitiatePayment(ctx context.Context, req *InitiatePaymentReque
 		UpdatedAt:         time.Now(),
 	}
 
+	// Persist initial transaction record (pending)
+	if err := s.repo.Create(ctx, tx); err != nil {
+		s.logger.Error("Transaction create failed", map[string]interface{}{
+			"error":              err.Error(),
+			"transaction_id":     tx.ID,
+			"reference":          tx.Reference,
+			"sender_id":          tx.SenderID,
+			"receiver_id":        tx.ReceiverID,
+			"sender_wallet_id":   tx.SenderWalletID,
+			"receiver_wallet_id": tx.ReceiverWalletID,
+			"amount":             tx.Amount.String(),
+			"currency":           string(tx.Currency),
+			"exchange_rate":      tx.ExchangeRate.String(),
+			"converted_amount":   tx.ConvertedAmount.String(),
+			"converted_currency": string(tx.ConvertedCurrency),
+			"fee_amount":         tx.FeeAmount.String(),
+			"status":             string(tx.Status),
+		})
+		return nil, err
+	}
+
 	// 6. Process payment atomically
 	if err := s.processPayment(ctx, tx, senderWallet, receiverWallet, totalDebit); err != nil {
 		tx.Status = domain.TransactionStatusFailed
 		reason := err.Error()
 		tx.StatusReason = &reason
-		_ = s.repo.Create(ctx, tx)
+		tx.UpdatedAt = time.Now()
+		s.logger.Error("Ledger posting failed", map[string]interface{}{
+			"error":              err.Error(),
+			"transaction_id":     tx.ID,
+			"reference":          tx.Reference,
+			"debit_wallet_id":    senderWallet.ID,
+			"credit_wallet_id":   receiverWallet.ID,
+			"debit_amount":       totalDebit.String(),
+			"credit_amount":      tx.ConvertedAmount.String(),
+			"currency":           string(tx.Currency),
+			"converted_currency": string(tx.ConvertedCurrency),
+			"exchange_rate":      tx.ExchangeRate.String(),
+			"fee_amount":         tx.FeeAmount.String(),
+		})
+		_ = s.repo.Update(ctx, tx)
 		return nil, err
 	}
 
 	tx.Status = domain.TransactionStatusCompleted
 	now := time.Now()
 	tx.CompletedAt = &now
+	tx.UpdatedAt = now
 
 	if err := s.repo.Update(ctx, tx); err != nil {
+		s.logger.Error("Transaction update failed", map[string]interface{}{
+			"error":          err.Error(),
+			"transaction_id": tx.ID,
+			"reference":      tx.Reference,
+			"status":         string(tx.Status),
+		})
 		return nil, err
 	}
 

@@ -84,6 +84,16 @@ Write-Output "Ports: auth=$($env:AUTH_PORT) payment=$($env:PAYMENT_PORT) forex=$
 
 if (-not (Test-Path logs)) { New-Item -ItemType Directory -Path logs | Out-Null }
 
+try {
+    $portsToKill = @($env:AUTH_PORT, $env:PAYMENT_PORT, $env:FOREX_PORT, $env:WALLET_PORT, $env:SETTLEMENT_PORT, $env:GATEWAY_PORT) | ForEach-Object { [int]$_ }
+    foreach ($p in $portsToKill) {
+        $conns = Get-NetTCPConnection -LocalPort $p -ErrorAction SilentlyContinue
+        foreach ($c in $conns) {
+            try { Stop-Process -Id $c.OwningProcess -Force -ErrorAction SilentlyContinue } catch {}
+        }
+    }
+} catch {}
+
 # Define services to start
 # Prefer compiled executables in build/. If missing, fall back to `go run`.
 $services = @(

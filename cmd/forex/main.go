@@ -102,6 +102,7 @@ func main() {
 	api := r.PathPrefix("/api/v1").Subrouter()
 	api.HandleFunc("/forex/rates", forexHandler.GetAllRates).Methods("GET")
 	api.HandleFunc("/forex/rate/{from}/{to}", forexHandler.GetRate).Methods("GET")
+	api.HandleFunc("/forex/rate", forexHandler.GetRateQuery).Methods("GET")
 	api.HandleFunc("/forex/calculate", forexHandler.Calculate).Methods("POST")
 	api.HandleFunc("/forex/history/{from}/{to}", forexHandler.GetHistory).Methods("GET")
 

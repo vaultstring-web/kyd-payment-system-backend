@@ -3,6 +3,7 @@ package handler
 
 import (
 	"encoding/json"
+	stdErrors "errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -49,16 +50,16 @@ func (h *PaymentHandler) InitiatePayment(w http.ResponseWriter, r *http.Request)
 		})
 
 		// Handle specific errors
-		if err == errors.ErrInsufficientBalance {
+		if stdErrors.Is(err, errors.ErrInsufficientBalance) {
 			h.respondError(w, http.StatusBadRequest, "Insufficient balance")
 			return
 		}
-		if err == errors.ErrWalletNotFound {
+		if stdErrors.Is(err, errors.ErrWalletNotFound) {
 			h.respondError(w, http.StatusNotFound, "Wallet not found")
 			return
 		}
 
-		h.respondError(w, http.StatusInternalServerError, "Payment failed")
+		h.respondError(w, http.StatusInternalServerError, fmt.Sprintf("Payment processing failed: %s", err.Error()))
 		return
 	}
 

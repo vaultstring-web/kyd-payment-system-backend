@@ -34,7 +34,8 @@ function Set-EnvFromFile {
     }
 }
 
-$repoRoot = Split-Path -Parent $MyInvocation.MyCommand.Definition
+# Resolve repository root (parent of the scripts directory)
+$repoRoot = (Resolve-Path (Join-Path $PSScriptRoot '..')).Path
 Set-Location $repoRoot
 
 # Load .env if present, otherwise .env.example
@@ -60,6 +61,12 @@ $ports = @{ auth = $env:AUTH_PORT; payment = $env:PAYMENT_PORT; forex = $env:FOR
 
 Write-Output "Using DB: $db"
 Write-Output "Using Redis: $redis"
+
+Write-Output "Applying database migrations..."
+go run ./cmd/migrate/main.go up
+
+Write-Output "Seeding users and wallets..."
+go run ./cmd/seed/main.go
 
 function Start-ServiceWindow {
     param($Name, $CmdEnv, $Cmd)

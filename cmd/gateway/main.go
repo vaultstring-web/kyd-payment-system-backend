@@ -6,6 +6,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
@@ -84,6 +85,18 @@ func createReverseProxy(target string) *httputil.ReverseProxy {
 func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	// Preflight handled by global CORS middleware on the router
 	if r.Method == http.MethodOptions {
+		// Ensure required headers present for browsers expecting specific allowances
+		origin := r.Header.Get("Origin")
+		if origin != "" {
+			w.Header().Set("Access-Control-Allow-Origin", origin)
+			w.Header().Set("Vary", "Origin")
+		} else {
+			w.Header().Set("Access-Control-Allow-Origin", "*")
+		}
+		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Request-ID, Idempotency-Key, idempotency-key, X-Requested-With, Accept")
+		w.Header().Set("Access-Control-Allow-Credentials", "true")
+		w.Header().Set("Access-Control-Max-Age", "3600")
 		w.WriteHeader(http.StatusNoContent)
 		return
 	}
@@ -93,6 +106,17 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		"path":   r.URL.Path,
 		"ip":     r.RemoteAddr,
 	})
+
+	// Route normalization: support query form for forex rate (?from=MWK&to=CNY)
+	if matchPath(r.URL.Path, "/api/v1/forex/rate") {
+		q := r.URL.Query()
+		from := q.Get("from")
+		to := q.Get("to")
+		if from != "" && to != "" {
+			r.URL.Path = fmt.Sprintf("/api/v1/forex/rate/%s/%s", from, to)
+			r.URL.RawQuery = ""
+		}
+	}
 
 	// Add common headers
 	w.Header().Set("X-Gateway-Version", "1.0.0")
@@ -151,6 +175,39 @@ func main() {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
 		w.Write([]byte(`{"status":"healthy","service":"gateway"}`))
+	}).Methods("GET")
+
+	// Normalize and proxy forex rate query (?from=MWK&to=CNY) to path form
+	r.HandleFunc("/api/v1/forex/rate", func(w http.ResponseWriter, r *http.Request) {
+		log.Info("Gateway forex query handler", map[string]interface{}{
+			"method": r.Method,
+			"path":   r.URL.Path,
+			"query":  r.URL.RawQuery,
+		})
+		q := r.URL.Query()
+		from := q.Get("from")
+		to := q.Get("to")
+		if from == "" || to == "" {
+			http.Error(w, `{"error":"from and to query parameters are required"}`, http.StatusBadRequest)
+			return
+		}
+		target := fmt.Sprintf("%s/api/v1/forex/rate/%s/%s", getEnv("FOREX_SERVICE_URL", "http://localhost:3002"), from, to)
+		log.Info("Forwarding forex query", map[string]interface{}{
+			"target": target,
+		})
+		resp, err := http.Get(target)
+		if err != nil {
+			http.Error(w, `{"error":"upstream forex service error"}`, http.StatusBadGateway)
+			return
+		}
+		defer resp.Body.Close()
+		for k, v := range resp.Header {
+			if len(v) > 0 {
+				w.Header().Set(k, v[0])
+			}
+		}
+		w.WriteHeader(resp.StatusCode)
+		_, _ = io.Copy(w, resp.Body)
 	}).Methods("GET")
 
 	// Route all other requests through gateway

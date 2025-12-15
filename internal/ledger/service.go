@@ -26,7 +26,7 @@ func NewService(db *sql.DB) *Service {
 func (s *Service) PostTransaction(ctx context.Context, posting *LedgerPosting) error {
 	tx, err := s.db.BeginTx(ctx, &sql.TxOptions{Isolation: sql.LevelSerializable})
 	if err != nil {
-		return err
+		return errors.Wrap(err, "begin transaction failed")
 	}
 	defer tx.Rollback()
 
@@ -43,7 +43,7 @@ func (s *Service) PostTransaction(ctx context.Context, posting *LedgerPosting) e
 			walletID,
 		).Scan(&balance)
 		if err != nil {
-			return err
+			return errors.Wrap(err, "wallet lock failed")
 		}
 	}
 
@@ -58,12 +58,12 @@ func (s *Service) PostTransaction(ctx context.Context, posting *LedgerPosting) e
 	`, posting.DebitAmount, posting.DebitWalletID)
 
 	if err != nil {
-		return err
+		return errors.Wrap(err, "debit wallet update failed")
 	}
 
 	rows, err := result.RowsAffected()
 	if err != nil {
-		return err
+		return errors.Wrap(err, "rows affected check failed")
 	}
 	if rows == 0 {
 		return errors.ErrInsufficientBalance
@@ -81,7 +81,7 @@ func (s *Service) PostTransaction(ctx context.Context, posting *LedgerPosting) e
 	`, posting.CreditAmount, posting.CreditWalletID)
 
 	if err != nil {
-		return err
+		return errors.Wrap(err, "credit wallet update failed")
 	}
 
 	// Create ledger entries (immutable audit trail)
@@ -91,21 +91,34 @@ func (s *Service) PostTransaction(ctx context.Context, posting *LedgerPosting) e
 			amount, currency, balance_after, created_at
 		) VALUES 
 		($1, $2, $3, 'debit', $4, $5, 
-			(SELECT available_balance FROM wallets WHERE id = $3), NOW()),
-		($6, $2, $7, 'credit', $8, $9, 
-			(SELECT available_balance FROM wallets WHERE id = $7), NOW())
+			(SELECT available_balance FROM wallets WHERE id = $3), NOW())
 	`,
 		uuid.New(), posting.TransactionID, posting.DebitWalletID,
 		posting.DebitAmount, posting.Currency,
-		uuid.New(), posting.CreditWalletID,
+	)
+	if err != nil {
+		return errors.Wrap(err, "insert debit ledger entry failed")
+	}
+	_, err = tx.ExecContext(ctx, `
+		INSERT INTO ledger_entries (
+			id, transaction_id, wallet_id, entry_type, 
+			amount, currency, balance_after, created_at
+		) VALUES 
+		($1, $2, $3, 'credit', $4, $5, 
+			(SELECT available_balance FROM wallets WHERE id = $3), NOW())
+	`,
+		uuid.New(), posting.TransactionID, posting.CreditWalletID,
 		posting.CreditAmount, posting.ConvertedCurrency,
 	)
 
 	if err != nil {
-		return err
+		return errors.Wrap(err, "insert credit ledger entry failed")
 	}
 
-	return tx.Commit()
+	if err := tx.Commit(); err != nil {
+		return errors.Wrap(err, "transaction commit failed")
+	}
+	return nil
 }
 
 type LedgerPosting struct {

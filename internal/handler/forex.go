@@ -5,6 +5,7 @@ import (
 	"encoding/json"
 	"io"
 	"net/http"
+	"strings"
 
 	"kyd/internal/domain"
 	"kyd/internal/forex"
@@ -42,6 +43,26 @@ func (h *ForexHandler) GetRate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	h.respondJSON(w, http.StatusOK, rate)
+}
+
+// GetRateQuery returns a specific FX rate using query parameters (?from=...&to=...).
+func (h *ForexHandler) GetRateQuery(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+	fromStr := strings.TrimSpace(q.Get("from"))
+	toStr := strings.TrimSpace(q.Get("to"))
+	if fromStr == "" || toStr == "" {
+		h.respondError(w, http.StatusBadRequest, "from and to query parameters are required")
+		return
+	}
+	from := domain.Currency(fromStr)
+	to := domain.Currency(toStr)
+
+	rate, err := h.service.GetRate(r.Context(), from, to)
+	if err != nil {
+		h.respondError(w, http.StatusNotFound, "Rate not found")
+		return
+	}
 	h.respondJSON(w, http.StatusOK, rate)
 }
 
