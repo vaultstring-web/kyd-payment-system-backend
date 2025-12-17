@@ -39,19 +39,37 @@ RIPPLE_SECRET_KEY=s...
 You can start from `env.example` (copy to `.env` if you use a dotenv loader).
 
 ## Database migrations
-Migrations live in `migrations/`. You can run them using the migrate tool:
+All migrations are merged into a single initial schema (`001_initial_schema.up.sql`) so fresh setups are simple.
+
+Run using the built-in migration command:
 ```bash
-migrate -path migrations -database "$DATABASE_URL" up
+# Windows PowerShell
+$env:DATABASE_URL="postgres://kyd_user:kyd_password@localhost:5432/kyd_dev?sslmode=disable"
+go run .\cmd\migrate\main.go up
 ```
-(Install from https://github.com/golang-migrate/migrate if you don’t have it.)
+
+Then seed test data:
+```bash
+go run .\cmd\seed\main.go
+```
 
 ## Running locally (Docker Compose)
 ```bash
 docker compose up -d postgres redis
 ```
 Then start services (choose one):
-- **PowerShell scripts**: `./scripts/run-services.ps1` or `./scripts/run-supervisor-fixed.ps1`
-- **Manual** (per service): `go run ./cmd/auth`, `go run ./cmd/payment`, etc. (set `SERVER_PORT` per service)
+- **PowerShell supervisor** (recommended):
+  ```powershell
+  powershell -ExecutionPolicy Bypass -File .\scripts\run-supervisor-fixed.ps1
+  ```
+- **Manual** (per service):
+  ```powershell
+  $env:SERVER_PORT="3000"; go run .\cmd\auth
+  $env:SERVER_PORT="3001"; go run .\cmd\payment
+  $env:SERVER_PORT="3002"; go run .\cmd\forex
+  $env:SERVER_PORT="3003"; go run .\cmd\wallet
+  $env:SERVER_PORT="9000"; go run .\cmd\gateway
+  ```
 
 Health checks:
 - `GET http://localhost:3000/health` (auth)
@@ -60,14 +78,14 @@ Health checks:
 - `GET http://localhost:3003/health` (wallet)
 - API Gateway (if used): `http://localhost:9000`
 
-## Tests
-```bash
-go test ./...
+## Verify backend
+Quick health and basic flow test:
+```powershell
+powershell -ExecutionPolicy Bypass -File .\test-backend.ps1
 ```
 
 ## API docs
 - Postman collection: `docs/KYD_API.postman_collection.json`
-- Quick endpoints summary: `WEBAPP_INTEGRATION.md`
 
 ## Notes
 - Binaries and logs are git-ignored (`.gitignore`). If you see `*.exe` in `build/`, they’re generated artifacts; delete locally as needed.
