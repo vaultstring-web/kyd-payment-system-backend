@@ -50,13 +50,14 @@ func NewService(
 }
 
 type InitiatePaymentRequest struct {
-	SenderID    uuid.UUID       `json:"sender_id" validate:"required"`
-	ReceiverID  uuid.UUID       `json:"receiver_id" validate:"required"`
-	Amount      decimal.Decimal `json:"amount" validate:"required"`
-	Currency    domain.Currency `json:"currency" validate:"required"`
-	Description string          `json:"description"`
-	Channel     string          `json:"channel"`
-	Category    string          `json:"category"`
+	SenderID         uuid.UUID       `json:"sender_id" validate:"required"`
+	ReceiverID       uuid.UUID       `json:"receiver_id" validate:"-"`
+	ReceiverWalletID uuid.UUID       `json:"receiver_wallet_id" validate:"-"`
+	Amount           decimal.Decimal `json:"amount" validate:"required"`
+	Currency         domain.Currency `json:"currency" validate:"required"`
+	Description      string          `json:"description"`
+	Channel          string          `json:"channel"`
+	Category         string          `json:"category"`
 }
 
 type PaymentResponse struct {
@@ -79,10 +80,20 @@ func (s *Service) InitiatePayment(ctx context.Context, req *InitiatePaymentReque
 		return nil, pkgerrors.Wrap(err, "sender wallet not found")
 	}
 
-	// Get receiver's wallet (auto-determine currency)
-	receiverWallet, err := s.getReceiverWallet(ctx, req.ReceiverID, req.Currency)
-	if err != nil {
-		return nil, pkgerrors.Wrap(err, "receiver wallet not found")
+	// Get receiver's wallet (wallet ID preferred, otherwise by user ID)
+	var receiverWallet *domain.Wallet
+	if req.ReceiverWalletID != uuid.Nil {
+		receiverWallet, err = s.walletRepo.FindByID(ctx, req.ReceiverWalletID)
+		if err != nil {
+			return nil, pkgerrors.Wrap(err, "receiver wallet not found")
+		}
+		// Ensure ReceiverID is set from wallet owner
+		req.ReceiverID = receiverWallet.UserID
+	} else {
+		receiverWallet, err = s.getReceiverWallet(ctx, req.ReceiverID, req.Currency)
+		if err != nil {
+			return nil, pkgerrors.Wrap(err, "receiver wallet not found")
+		}
 	}
 
 	// 2. Check if currency conversion needed
@@ -256,8 +267,16 @@ func (s *Service) GetTransaction(ctx context.Context, id uuid.UUID) (*domain.Tra
 	return s.repo.FindByID(ctx, id)
 }
 
-func (s *Service) GetUserTransactions(ctx context.Context, userID uuid.UUID, limit, offset int) ([]*domain.Transaction, error) {
-	return s.repo.FindByUserID(ctx, userID, limit, offset)
+func (s *Service) GetUserTransactions(ctx context.Context, userID uuid.UUID, limit, offset int) ([]*domain.Transaction, int, error) {
+	txs, err := s.repo.FindByUserID(ctx, userID, limit, offset)
+	if err != nil {
+		return nil, 0, err
+	}
+	total, err := s.repo.CountByUserID(ctx, userID)
+	if err != nil {
+		return nil, 0, err
+	}
+	return txs, total, nil
 }
 
 // Repository interfaces
@@ -267,6 +286,7 @@ type Repository interface {
 	FindByID(ctx context.Context, id uuid.UUID) (*domain.Transaction, error)
 	FindByReference(ctx context.Context, ref string) (*domain.Transaction, error)
 	FindByUserID(ctx context.Context, userID uuid.UUID, limit, offset int) ([]*domain.Transaction, error)
+	CountByUserID(ctx context.Context, userID uuid.UUID) (int, error)
 }
 
 type WalletRepository interface {

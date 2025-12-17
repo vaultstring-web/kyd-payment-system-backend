@@ -9,6 +9,7 @@ import (
 	"net/http"
 	"strconv"
 
+	"kyd/internal/domain"
 	"kyd/internal/middleware"
 	"kyd/internal/payment"
 	"kyd/pkg/errors"
@@ -17,6 +18,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/gorilla/mux"
+	"github.com/shopspring/decimal"
 )
 
 // PaymentHandler manages payment-related endpoints.
@@ -41,6 +43,9 @@ func (h *PaymentHandler) InitiatePayment(w http.ResponseWriter, r *http.Request)
 	if err != nil {
 		return
 	}
+
+	// Ensure sender_id is set from authenticated user
+	req.SenderID = userID
 
 	response, err := h.service.InitiatePayment(r.Context(), &req)
 	if err != nil {
@@ -69,17 +74,78 @@ func (h *PaymentHandler) InitiatePayment(w http.ResponseWriter, r *http.Request)
 func (h *PaymentHandler) decodeInitiatePaymentRequest(w http.ResponseWriter, r *http.Request) (payment.InitiatePaymentRequest, uuid.UUID, error) {
 	var req payment.InitiatePaymentRequest
 
-	r.Body = http.MaxBytesReader(w, r.Body, 1<<20) // 1MB limit
-	dec := json.NewDecoder(r.Body)
-	dec.DisallowUnknownFields()
-
-	if err := dec.Decode(&req); err != nil {
-		if err == io.EOF {
-			h.respondError(w, http.StatusBadRequest, "Request body is required")
-			return req, uuid.Nil, err
-		}
-		h.respondError(w, http.StatusBadRequest, "Invalid request body")
+	bodyBytes, err := io.ReadAll(r.Body)
+	if err != nil {
+		h.respondError(w, http.StatusBadRequest, "Request body is required")
 		return req, uuid.Nil, err
+	}
+	if len(bodyBytes) == 0 {
+		h.respondError(w, http.StatusBadRequest, "Request body is required")
+		return req, uuid.Nil, fmt.Errorf("empty body")
+	}
+	var raw map[string]interface{}
+	if err := json.Unmarshal(bodyBytes, &raw); err != nil {
+		h.logger.Error("Decode initiate payment failed", map[string]interface{}{"error": err.Error()})
+		h.respondError(w, http.StatusBadRequest, fmt.Sprintf("Invalid request body: %s", err.Error()))
+		return req, uuid.Nil, err
+	}
+
+	// Parse fields manually to tolerate number/string types and provide clearer errors
+	if v, ok := raw["receiver_wallet_id"]; ok && v != nil {
+		if s, ok := v.(string); ok && s != "" {
+			if id, err := uuid.Parse(s); err == nil {
+				req.ReceiverWalletID = id
+			} else {
+				h.respondError(w, http.StatusBadRequest, "Invalid receiver_wallet_id format")
+				return req, uuid.Nil, err
+			}
+		}
+	}
+	if v, ok := raw["receiver_id"]; ok && v != nil {
+		if s, ok := v.(string); ok && s != "" {
+			if id, err := uuid.Parse(s); err == nil {
+				req.ReceiverID = id
+			} else {
+				h.respondError(w, http.StatusBadRequest, "Invalid receiver_id format")
+				return req, uuid.Nil, err
+			}
+		}
+	}
+	if v, ok := raw["amount"]; ok && v != nil {
+		switch vv := v.(type) {
+		case float64:
+			req.Amount = decimal.NewFromFloat(vv)
+		case string:
+			d, derr := decimal.NewFromString(vv)
+			if derr != nil {
+				h.respondError(w, http.StatusBadRequest, "Invalid amount")
+				return req, uuid.Nil, derr
+			}
+			req.Amount = d
+		default:
+			h.respondError(w, http.StatusBadRequest, "Invalid amount type")
+			return req, uuid.Nil, fmt.Errorf("invalid amount type")
+		}
+	}
+	if v, ok := raw["currency"]; ok && v != nil {
+		if s, ok := v.(string); ok && s != "" {
+			req.Currency = domain.Currency(s)
+		}
+	}
+	if v, ok := raw["description"]; ok && v != nil {
+		if s, ok := v.(string); ok {
+			req.Description = s
+		}
+	}
+	if v, ok := raw["channel"]; ok && v != nil {
+		if s, ok := v.(string); ok {
+			req.Channel = s
+		}
+	}
+	if v, ok := raw["category"]; ok && v != nil {
+		if s, ok := v.(string); ok {
+			req.Category = s
+		}
 	}
 
 	userID, ok := middleware.UserIDFromContext(r.Context())
@@ -87,16 +153,24 @@ func (h *PaymentHandler) decodeInitiatePaymentRequest(w http.ResponseWriter, r *
 		h.respondError(w, http.StatusUnauthorized, "Unauthorized")
 		return req, uuid.Nil, fmt.Errorf("unauthorized")
 	}
+	// Attach authenticated user as sender
 	req.SenderID = userID
 
-	if err := h.validator.Validate(&req); err != nil {
-		h.respondError(w, http.StatusBadRequest, err.Error())
-		return req, uuid.Nil, err
-	}
-
+	// Basic validation (manual to allow either receiver_id or receiver_wallet_id)
 	if req.Amount.IsZero() || req.Amount.IsNegative() {
 		h.respondError(w, http.StatusBadRequest, "Amount must be greater than 0")
 		return req, uuid.Nil, fmt.Errorf("invalid amount")
+	}
+	if req.ReceiverID == uuid.Nil && req.ReceiverWalletID == uuid.Nil {
+		h.respondError(w, http.StatusBadRequest, "Provide receiver_id or receiver_wallet_id")
+		return req, uuid.Nil, fmt.Errorf("missing receiver")
+	}
+
+	// Run validator for required fields except conditional ones
+	if err := h.validator.Validate(&req); err != nil {
+		h.logger.Error("Validation failed for initiate payment", map[string]interface{}{"error": err.Error()})
+		h.respondError(w, http.StatusBadRequest, err.Error())
+		return req, uuid.Nil, err
 	}
 
 	return req, userID, nil
@@ -137,17 +211,27 @@ func (h *PaymentHandler) GetUserTransactions(w http.ResponseWriter, r *http.Requ
 
 	limit, offset := parsePagination(r)
 
-	txs, err := h.service.GetUserTransactions(r.Context(), userID, limit, offset)
+	txs, total, err := h.service.GetUserTransactions(r.Context(), userID, limit, offset)
 	if err != nil {
 		h.respondError(w, http.StatusInternalServerError, "Failed to fetch transactions")
 		return
+	}
+
+	count := len(txs)
+	hasMore := offset+count < total
+	nextOffset := offset + count
+	if nextOffset > total {
+		nextOffset = total
 	}
 
 	h.respondJSON(w, http.StatusOK, map[string]interface{}{
 		"transactions": txs,
 		"limit":        limit,
 		"offset":       offset,
-		"count":        len(txs),
+		"count":        count,
+		"total":        total,
+		"has_more":     hasMore,
+		"next_offset":  nextOffset,
 	})
 }
 
@@ -207,7 +291,7 @@ func (h *PaymentHandler) BulkPayment(w http.ResponseWriter, r *http.Request) {
 }
 
 func parsePagination(r *http.Request) (int, int) {
-	limit := 20
+	limit := 10
 	offset := 0
 
 	if limitStr := r.URL.Query().Get("limit"); limitStr != "" {

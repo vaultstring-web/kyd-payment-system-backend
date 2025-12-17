@@ -88,7 +88,8 @@ func main() {
 
 	// Initialize forex providers
 	forexProviders := []forex.RateProvider{
-		forex.NewMockRateProvider(), // Add real providers here
+		forex.NewExchangeRateAPIProvider(),
+		forex.NewMockRateProvider(),
 	}
 
 	// Wrap redis client with RateCache adapter

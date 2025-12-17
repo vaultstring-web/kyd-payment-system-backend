@@ -369,6 +369,20 @@ func (r *TransactionRepository) FindByUserID(ctx context.Context, userID uuid.UU
 	return txs, nil
 }
 
+func (r *TransactionRepository) CountByUserID(ctx context.Context, userID uuid.UUID) (int, error) {
+	var total int
+	query := `
+        SELECT COUNT(*) 
+        FROM transactions 
+        WHERE sender_id = $1 OR receiver_id = $1
+    `
+	err := r.db.GetContext(ctx, &total, query, userID)
+	if err != nil {
+		return 0, errors.Wrap(err, "failed to count transactions")
+	}
+	return total, nil
+}
+
 func (r *TransactionRepository) FindPendingSettlement(ctx context.Context, limit int) ([]*domain.Transaction, error) {
 	var txs []*domain.Transaction
 	query := `
