@@ -9,7 +9,7 @@ Usage:
 
 What it does:
   - Loads env vars from `.env` (if present) or `.env.example`.
-  - Starts each service in a new PowerShell window (so you can see logs).
+  - Assumes services are already running (use `scripts/run-supervisor-fixed.ps1`).
   - Waits for the gateway health endpoint to be ready.
   - Runs a scripted test: logs in seeded users, initiates an MWK -> CNY payment,
     and prints the transaction response and recipient wallets.
@@ -66,22 +66,20 @@ Write-Output "Applying database migrations..."
 go run ./cmd/migrate/main.go up
 
 Write-Output "Seeding users and wallets..."
+# Ensure seed uses compliant phone format and known credentials
+$env:SEED_EMAIL = 'john.doe@example.com'
+$env:SEED_PASSWORD = 'Password123'
+$env:SEED_PHONE = '+265991234567'
+$env:SEED_FIRST = 'John'
+$env:SEED_LAST = 'Doe'
+$env:SEED_COUNTRY = 'MW'
+$env:SEED_WANG_EMAIL = 'wang.wei@example.com'
+$env:SEED_WANG_PASSWORD = 'Password123'
+$env:SEED_WANG_PHONE = '+8613800138000'
+$env:SEED_WANG_FIRST = 'Wang'
+$env:SEED_WANG_LAST = 'Wei'
+$env:SEED_WANG_COUNTRY = 'CN'
 go run ./cmd/seed/main.go
-
-function Start-ServiceWindow {
-    param($Name, $CmdEnv, $Cmd)
-    $psCmd = "`$env:DATABASE_URL='$($env:DATABASE_URL)'; `$env:REDIS_URL='$($env:REDIS_URL)'; `$env:JWT_SECRET='$($env:JWT_SECRET)'; `$env:SERVER_PORT='$($CmdEnv)'; cd `"$repoRoot`"; $Cmd"
-    Start-Process -FilePath "powershell" -ArgumentList ("-NoExit","-Command","$psCmd") -WindowStyle Normal
-    Write-Output "Started $Name (PORT=$CmdEnv)"
-}
-
-# Start each service in its own window so logs are visible
-Start-ServiceWindow -Name auth -CmdEnv $ports.auth -Cmd "go run ./cmd/auth"
-Start-ServiceWindow -Name wallet -CmdEnv $ports.wallet -Cmd "go run ./cmd/wallet"
-Start-ServiceWindow -Name forex -CmdEnv $ports.forex -Cmd "go run ./cmd/forex"
-Start-ServiceWindow -Name payment -CmdEnv $ports.payment -Cmd "go run ./cmd/payment"
-Start-ServiceWindow -Name settlement -CmdEnv $ports.settlement -Cmd "go run ./cmd/settlement"
-Start-ServiceWindow -Name gateway -CmdEnv $ports.gateway -Cmd "go run ./cmd/gateway"
 
 Write-Output "Waiting for gateway to become healthy on port $($ports.gateway)..."
 $gatewayUrl = "http://localhost:$($ports.gateway)/health"

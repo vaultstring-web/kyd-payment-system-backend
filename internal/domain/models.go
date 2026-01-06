@@ -49,6 +49,9 @@ type BlockchainNetwork = pkg.BlockchainNetwork
 // SettlementStatus represents settlement lifecycle states.
 type SettlementStatus = pkg.SettlementStatus
 
+// AuditLog represents a system audit log entry.
+type AuditLog = pkg.AuditLog
+
 // Re-exported currency codes.
 const (
 	MWK = pkg.MWK

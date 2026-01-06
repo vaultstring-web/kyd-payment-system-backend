@@ -278,7 +278,7 @@ ALTER TABLE transactions
 CREATE OR REPLACE FUNCTION enforce_wallet_currency() RETURNS trigger AS $$
 DECLARE cc VARCHAR(2);
 BEGIN
-  SELECT country_code INTO cc FROM users WHERE id = NEW.user_id;
+  SELECT country_code INTO cc FROM customer_schema.users WHERE id = NEW.user_id;
   IF cc IS NULL THEN
     RAISE EXCEPTION 'user not found for wallet';
   END IF;

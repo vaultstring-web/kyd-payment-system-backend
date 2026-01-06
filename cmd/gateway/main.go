@@ -6,7 +6,6 @@ package main
 import (
 	"context"
 	"fmt"
-	"io"
 	"net/http"
 	"net/http/httputil"
 	"net/url"
@@ -15,10 +14,10 @@ import (
 	"syscall"
 	"time"
 
-	"kyd/internal/middleware"
 	"kyd/pkg/config"
 	"kyd/pkg/logger"
 
+	"github.com/google/uuid"
 	"github.com/gorilla/mux"
 )
 
@@ -32,74 +31,126 @@ type Gateway struct {
 }
 
 func NewGateway(log logger.Logger) *Gateway {
-	// Read target service URLs from environment, fall back to local defaults
-	authURL := getEnv("AUTH_SERVICE_URL", "http://localhost:3000")
-	paymentURL := getEnv("PAYMENT_SERVICE_URL", "http://localhost:3001")
-	walletURL := getEnv("WALLET_SERVICE_URL", "http://localhost:3003")
-	forexURL := getEnv("FOREX_SERVICE_URL", "http://localhost:3002")
-	settlementURL := getEnv("SETTLEMENT_SERVICE_URL", "http://localhost:3004")
-
-	log.Info("Gateway service targets", map[string]interface{}{
-		"auth":       authURL,
-		"payment":    paymentURL,
-		"wallet":     walletURL,
-		"forex":      forexURL,
-		"settlement": settlementURL,
-	})
-
 	return &Gateway{
-		authProxy:       createReverseProxy(authURL),
-		paymentProxy:    createReverseProxy(paymentURL),
-		walletProxy:     createReverseProxy(walletURL),
-		forexProxy:      createReverseProxy(forexURL),
-		settlementProxy: createReverseProxy(settlementURL),
+		authProxy:       createReverseProxy("http://localhost:3000"),
+		paymentProxy:    createReverseProxy("http://localhost:3001"),
+		walletProxy:     createReverseProxy("http://localhost:3003"),
+		forexProxy:      createReverseProxy("http://localhost:3002"),
+		settlementProxy: createReverseProxy("http://localhost:3004"),
 		logger:          log,
 	}
 }
 
 func createReverseProxy(target string) *httputil.ReverseProxy {
-	u, err := url.Parse(target)
-	if err != nil || u.Scheme == "" || u.Host == "" {
-		director := func(req *http.Request) {}
-		rp := &httputil.ReverseProxy{Director: director}
-		rp.ErrorHandler = func(w http.ResponseWriter, r *http.Request, e error) {
-			w.WriteHeader(http.StatusBadGateway)
-			_, _ = w.Write([]byte(`{"error":"invalid upstream configuration"}`))
+	url, _ := url.Parse(target)
+	proxy := httputil.NewSingleHostReverseProxy(url)
+
+	// Store original Director to capture request
+	originalDirector := proxy.Director
+	proxy.Director = func(req *http.Request) {
+		originalDirector(req)
+		// Store origin header in a custom header that gets forwarded to backend
+		// This allows ModifyResponse to access it even if backend modifies headers
+		if origin := req.Header.Get("Origin"); origin != "" {
+			req.Header.Set("X-Gateway-Origin", origin)
 		}
-		return rp
+		// Inject Idempotency-Key for unsafe methods if missing
+		if req.Method == http.MethodPost || req.Method == http.MethodPut || req.Method == http.MethodPatch || req.Method == http.MethodDelete {
+			if req.Header.Get("Idempotency-Key") == "" {
+				req.Header.Set("Idempotency-Key", uuid.NewString())
+			}
+		}
 	}
-	rp := httputil.NewSingleHostReverseProxy(u)
-	rp.ModifyResponse = func(resp *http.Response) error {
-		// Remove upstream CORS headers to avoid duplicates; router middleware sets ours.
-		h := resp.Header
-		h.Del("Access-Control-Allow-Origin")
-		h.Del("Access-Control-Allow-Credentials")
-		h.Del("Access-Control-Allow-Headers")
-		h.Del("Access-Control-Allow-Methods")
-		h.Del("Access-Control-Expose-Headers")
+
+	// Handle proxy errors by adding CORS headers
+	proxy.ErrorHandler = func(w http.ResponseWriter, r *http.Request, err error) {
+		origin := r.Header.Get("Origin")
+		allowedOrigins := []string{
+			"http://localhost:3012",
+			"http://localhost:3016",
+			"http://127.0.0.1:3012",
+			"http://127.0.0.1:3016",
+		}
+
+		allowed := false
+		for _, allowedOrigin := range allowedOrigins {
+			if origin == allowedOrigin {
+				allowed = true
+				break
+			}
+		}
+
+		if allowed {
+			w.Header().Set("Access-Control-Allow-Origin", origin)
+			w.Header().Set("Access-Control-Allow-Credentials", "true")
+		}
+
+		w.WriteHeader(http.StatusBadGateway)
+		// Return a JSON error to be more API friendly
+		w.Write([]byte(fmt.Sprintf(`{"error": "Bad Gateway", "message": "%v"}`, err)))
+	}
+
+	// Modify response to handle CORS properly
+	originalModifyResponse := proxy.ModifyResponse
+	proxy.ModifyResponse = func(resp *http.Response) error {
+		// Remove CORS headers that backend services might set
+		resp.Header.Del("Access-Control-Allow-Origin")
+		resp.Header.Del("Access-Control-Allow-Methods")
+		resp.Header.Del("Access-Control-Allow-Headers")
+		resp.Header.Del("Access-Control-Allow-Credentials")
+		resp.Header.Del("Access-Control-Max-Age")
+
+		// Get origin from request (stored in custom header by Director)
+		origin := resp.Request.Header.Get("X-Gateway-Origin")
+		if origin == "" {
+			origin = resp.Request.Header.Get("Origin")
+		}
+
+		allowedOrigins := []string{
+			"http://localhost:3012",
+			"http://localhost:3016",
+			"http://127.0.0.1:3012",
+			"http://127.0.0.1:3016",
+		}
+
+		allowed := false
+		for _, allowedOrigin := range allowedOrigins {
+			if origin == allowedOrigin {
+				allowed = true
+				break
+			}
+		}
+
+		// Set CORS headers
+		if allowed {
+			resp.Header.Set("Access-Control-Allow-Origin", origin)
+			resp.Header.Set("Access-Control-Allow-Credentials", "true")
+		} else if origin != "" {
+			resp.Header.Set("Access-Control-Allow-Origin", "*")
+		}
+
+		resp.Header.Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
+		resp.Header.Set("Access-Control-Allow-Headers", "Content-Type, Authorization, Idempotency-Key, X-Request-ID")
+		resp.Header.Set("Access-Control-Max-Age", "3600")
+
+		// Call original ModifyResponse if it exists
+		if originalModifyResponse != nil {
+			return originalModifyResponse(resp)
+		}
 		return nil
 	}
-	return rp
+
+	return proxy
 }
 
 func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
-	// Preflight handled by global CORS middleware on the router
-	if r.Method == http.MethodOptions {
-		// Ensure required headers present for browsers expecting specific allowances
-		origin := r.Header.Get("Origin")
-		if origin != "" {
-			w.Header().Set("Access-Control-Allow-Origin", origin)
-			w.Header().Set("Vary", "Origin")
-		} else {
-			w.Header().Set("Access-Control-Allow-Origin", "*")
-		}
-		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, PATCH, DELETE, OPTIONS")
-		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Request-ID, Idempotency-Key, idempotency-key, X-Requested-With, Accept")
-		w.Header().Set("Access-Control-Allow-Credentials", "true")
-		w.Header().Set("Access-Control-Max-Age", "3600")
+	// Handle OPTIONS preflight requests
+	if r.Method == "OPTIONS" {
+		g.handleCORS(w, r)
 		w.WriteHeader(http.StatusNoContent)
 		return
 	}
+
 	// Log request
 	g.logger.Info("Gateway request", map[string]interface{}{
 		"method": r.Method,
@@ -107,25 +158,17 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		"ip":     r.RemoteAddr,
 	})
 
-	// Route normalization: support query form for forex rate (?from=MWK&to=CNY)
-	if matchPath(r.URL.Path, "/api/v1/forex/rate") {
-		q := r.URL.Query()
-		from := q.Get("from")
-		to := q.Get("to")
-		if from != "" && to != "" {
-			r.URL.Path = fmt.Sprintf("/api/v1/forex/rate/%s/%s", from, to)
-			r.URL.RawQuery = ""
-		}
-	}
-
 	// Add common headers
 	w.Header().Set("X-Gateway-Version", "1.0.0")
 	w.Header().Set("X-Request-ID", r.Header.Get("X-Request-ID"))
 
-	// Route to appropriate service
+	// Route to appropriate service (CORS handled in ModifyResponse)
 	switch {
 	case matchPath(r.URL.Path, "/api/v1/auth"):
 		g.authProxy.ServeHTTP(w, r)
+	case matchPath(r.URL.Path, "/api/v1/admin"):
+		// Admin endpoints are handled by payment service
+		g.paymentProxy.ServeHTTP(w, r)
 	case matchPath(r.URL.Path, "/api/v1/payments"):
 		g.paymentProxy.ServeHTTP(w, r)
 	case matchPath(r.URL.Path, "/api/v1/wallets"):
@@ -136,18 +179,41 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		g.settlementProxy.ServeHTTP(w, r)
 	default:
 		http.Error(w, "Service not found", http.StatusNotFound)
+		return
 	}
+}
+
+func (g *Gateway) handleCORS(w http.ResponseWriter, r *http.Request) {
+	origin := r.Header.Get("Origin")
+	allowedOrigins := []string{
+		"http://localhost:3012",
+		"http://localhost:3016",
+		"http://127.0.0.1:3012",
+		"http://127.0.0.1:3016",
+	}
+
+	allowed := false
+	for _, allowedOrigin := range allowedOrigins {
+		if origin == allowedOrigin {
+			allowed = true
+			break
+		}
+	}
+
+	if allowed {
+		w.Header().Set("Access-Control-Allow-Origin", origin)
+		w.Header().Set("Access-Control-Allow-Credentials", "true")
+	} else if origin != "" {
+		w.Header().Set("Access-Control-Allow-Origin", "*")
+	}
+
+	w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
+	w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, Idempotency-Key, X-Request-ID")
+	w.Header().Set("Access-Control-Max-Age", "3600")
 }
 
 func matchPath(path, prefix string) bool {
 	return len(path) >= len(prefix) && path[:len(prefix)] == prefix
-}
-
-func getEnv(key, def string) string {
-	if v := os.Getenv(key); v != "" {
-		return v
-	}
-	return def
 }
 
 func main() {
@@ -162,52 +228,11 @@ func main() {
 
 	r := mux.NewRouter()
 
-	// Global middleware
-	r.Use(middleware.CORS)
-	r.Use(middleware.SecurityHeaders)
-	r.Use(middleware.Recovery)
-	r.Use(middleware.CorrelationID)
-	r.Use(middleware.NewLoggingMiddleware(log).Log)
-	r.Use(middleware.BodyLimit(1 << 20))
-
 	// Health check
 	r.HandleFunc("/health", func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
 		w.Write([]byte(`{"status":"healthy","service":"gateway"}`))
-	}).Methods("GET")
-
-	// Normalize and proxy forex rate query (?from=MWK&to=CNY) to path form
-	r.HandleFunc("/api/v1/forex/rate", func(w http.ResponseWriter, r *http.Request) {
-		log.Info("Gateway forex query handler", map[string]interface{}{
-			"method": r.Method,
-			"path":   r.URL.Path,
-			"query":  r.URL.RawQuery,
-		})
-		q := r.URL.Query()
-		from := q.Get("from")
-		to := q.Get("to")
-		if from == "" || to == "" {
-			http.Error(w, `{"error":"from and to query parameters are required"}`, http.StatusBadRequest)
-			return
-		}
-		target := fmt.Sprintf("%s/api/v1/forex/rate/%s/%s", getEnv("FOREX_SERVICE_URL", "http://localhost:3002"), from, to)
-		log.Info("Forwarding forex query", map[string]interface{}{
-			"target": target,
-		})
-		resp, err := http.Get(target)
-		if err != nil {
-			http.Error(w, `{"error":"upstream forex service error"}`, http.StatusBadGateway)
-			return
-		}
-		defer resp.Body.Close()
-		for k, v := range resp.Header {
-			if len(v) > 0 {
-				w.Header().Set(k, v[0])
-			}
-		}
-		w.WriteHeader(resp.StatusCode)
-		_, _ = io.Copy(w, resp.Body)
 	}).Methods("GET")
 
 	// Route all other requests through gateway

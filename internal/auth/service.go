@@ -17,6 +17,7 @@ import (
 
 	"kyd/internal/domain"
 	kyderrors "kyd/pkg/errors"
+	"kyd/pkg/mailer"
 
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/google/uuid"
@@ -27,9 +28,12 @@ import (
 
 // Service provides user registration, login, and token issuance.
 type Service struct {
-	repo      Repository
-	jwtSecret string
-	jwtExpiry time.Duration
+	repo                Repository
+	jwtSecret           string
+	jwtExpiry           time.Duration
+	mailer              *mailer.Mailer
+	verificationBaseURL string
+	verificationExpiry  time.Duration
 }
 
 // NewService constructs a Service with the given repository and JWT settings.
@@ -39,6 +43,14 @@ func NewService(repo Repository, jwtSecret string, jwtExpiry time.Duration) *Ser
 		jwtSecret: jwtSecret,
 		jwtExpiry: jwtExpiry,
 	}
+}
+
+// WithEmailVerification configures mailer and verification options.
+func (s *Service) WithEmailVerification(m *mailer.Mailer, baseURL string, expiry time.Duration) *Service {
+	s.mailer = m
+	s.verificationBaseURL = baseURL
+	s.verificationExpiry = expiry
+	return s
 }
 
 // RegisterRequest captures the fields required to create a new user.
@@ -110,6 +122,11 @@ func (s *Service) Register(ctx context.Context, req *RegisterRequest) (*TokenRes
 		return nil, err
 	}
 
+	// Send email verification if configured
+	if s.mailer != nil && s.verificationBaseURL != "" {
+		_ = s.sendVerificationEmail(user)
+	}
+
 	// Generate tokens
 	return s.generateTokens(user)
 }
@@ -168,6 +185,77 @@ func (s *Service) generateTokens(user *domain.User) (*TokenResponse, error) {
 	}, nil
 }
 
+// GetUserByID fetches a user by ID.
+func (s *Service) GetUserByID(ctx context.Context, id uuid.UUID) (*domain.User, error) {
+	return s.repo.FindByID(ctx, id)
+}
+
+func (s *Service) sendVerificationEmail(user *domain.User) error {
+	claims := jwt.MapClaims{
+		"user_id": user.ID.String(),
+		"email":   user.Email,
+		"purpose": "email_verification",
+		"exp":     time.Now().Add(s.verificationExpiry).Unix(),
+		"iat":     time.Now().Unix(),
+	}
+	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
+	signed, err := token.SignedString([]byte(s.jwtSecret))
+	if err != nil {
+		return err
+	}
+	link := fmt.Sprintf("%s?token=%s", s.verificationBaseURL, signed)
+	body := fmt.Sprintf(`<p>Hello %s,</p>
+<p>Verify your email by clicking the link below:</p>
+<p><a href="%s">%s</a></p>
+<p>If you did not request this, please ignore.</p>`, user.FirstName, link, link)
+	return s.mailer.Send(user.Email, "Verify your email", body)
+}
+
+func (s *Service) SendVerificationByEmail(ctx context.Context, email string) error {
+	if s.mailer == nil || s.verificationBaseURL == "" {
+		return nil
+	}
+	user, err := s.repo.FindByEmail(ctx, email)
+	if err != nil {
+		return err
+	}
+	return s.sendVerificationEmail(user)
+}
+
+// VerifyEmail decodes the verification token and marks the user's email as verified.
+func (s *Service) VerifyEmail(ctx context.Context, tokenString string) error {
+	token, err := jwt.Parse(tokenString, func(token *jwt.Token) (interface{}, error) {
+		if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
+			return nil, jwt.ErrSignatureInvalid
+		}
+		return []byte(s.jwtSecret), nil
+	})
+	if err != nil || !token.Valid {
+		return kyderrors.ErrInvalidCredentials
+	}
+	claims, ok := token.Claims.(jwt.MapClaims)
+	if !ok {
+		return kyderrors.ErrInvalidCredentials
+	}
+	if purpose, _ := claims["purpose"].(string); purpose != "email_verification" {
+		return kyderrors.ErrInvalidCredentials
+	}
+	userIDStr, ok := claims["user_id"].(string)
+	if !ok {
+		return kyderrors.ErrInvalidCredentials
+	}
+	id, err := uuid.Parse(userIDStr)
+	if err != nil {
+		return kyderrors.ErrInvalidCredentials
+	}
+	return s.repo.SetEmailVerified(ctx, id)
+}
+
+// DebugFindByEmail finds a user by email for debugging purposes.
+func (s *Service) DebugFindByEmail(ctx context.Context, email string) (*domain.User, error) {
+	return s.repo.FindByEmail(ctx, email)
+}
+
 func generateRandomToken(length int) (string, error) {
 	b := make([]byte, length)
 	if _, err := rand.Read(b); err != nil {
@@ -183,4 +271,5 @@ type Repository interface {
 	FindByEmail(ctx context.Context, email string) (*domain.User, error)
 	ExistsByEmail(ctx context.Context, email string) (bool, error)
 	Update(ctx context.Context, user *domain.User) error
+	SetEmailVerified(ctx context.Context, id uuid.UUID) error
 }

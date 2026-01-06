@@ -25,6 +25,7 @@ import (
 	"kyd/internal/repository/postgres"
 	"kyd/pkg/config"
 	"kyd/pkg/logger"
+	"kyd/pkg/mailer"
 	"kyd/pkg/validator"
 )
 
@@ -67,6 +68,16 @@ func main() {
 
 	// Initialize services
 	authService := auth.NewService(userRepo, cfg.JWT.Secret, cfg.JWT.Expiration)
+	// Configure email verification
+	m := mailer.New(mailer.Config{
+		Host:     cfg.Email.SMTPHost,
+		Port:     cfg.Email.SMTPPort,
+		Username: cfg.Email.SMTPUsername,
+		Password: cfg.Email.SMTPPassword,
+		From:     cfg.Email.SMTPFrom,
+		UseTLS:   cfg.Email.SMTPUseTLS,
+	})
+	authService = authService.WithEmailVerification(m, cfg.Verification.BaseURL, cfg.Verification.TokenExpiration)
 
 	// Initialize handlers
 	val := validator.New()
@@ -88,6 +99,14 @@ func main() {
 	r.HandleFunc("/health", healthCheck).Methods("GET")
 	r.HandleFunc("/api/v1/auth/register", authHandler.Register).Methods("POST")
 	r.HandleFunc("/api/v1/auth/login", authHandler.Login).Methods("POST")
+	r.HandleFunc("/api/v1/auth/send-verification", authHandler.SendVerification).Methods("POST")
+	r.HandleFunc("/api/v1/auth/verify", authHandler.VerifyEmail).Methods("GET")
+
+	// Protected routes
+	authMW := middleware.NewAuthMiddleware(cfg.JWT.Secret)
+	api := r.PathPrefix("/api/v1").Subrouter()
+	api.Use(authMW.Authenticate)
+	api.HandleFunc("/auth/me", authHandler.Me).Methods("GET")
 
 	// Start server
 	srv := &http.Server{

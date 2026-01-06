@@ -102,7 +102,7 @@ services:
       JWT_SECRET: sk_4f9b8c1e7a23d94f0b6de1a28cd94f71d9f3b0c28c6fa47e9b12df67c8e41a25
       SERVER_PORT: 8080
     ports:
-      - "9001:8080"
+      - "3003:8080"
     depends_on:
       postgres:
         condition: service_healthy

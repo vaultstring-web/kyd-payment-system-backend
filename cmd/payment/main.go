@@ -5,18 +5,22 @@ package main
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"os"
 	"os/signal"
+	"strconv"
 	"syscall"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/gorilla/mux"
 	"github.com/jmoiron/sqlx"
 	_ "github.com/lib/pq"
 	"github.com/redis/go-redis/v9"
 
+	"kyd/internal/domain"
 	"kyd/internal/forex"
 	"kyd/internal/handler"
 	"kyd/internal/ledger"
@@ -125,6 +129,190 @@ func main() {
 	api := r.PathPrefix("/api/v1").Subrouter()
 	api.Use(authMW.Authenticate)
 	api.Use(middleware.NewRateLimiter(redisClient, 60, time.Minute).Limit)
+
+	// Admin routes
+	admin := api.PathPrefix("/admin").Subrouter()
+	admin.Use(middleware.NewRateLimiter(redisClient, 60, time.Minute).Limit)
+	admin.HandleFunc("/users", func(w http.ResponseWriter, r *http.Request) {
+		ut, _ := middleware.UserTypeFromContext(r.Context())
+		if ut != "admin" {
+			w.WriteHeader(http.StatusForbidden)
+			w.Write([]byte(`{"error":"admin access required"}`))
+			return
+		}
+		limit := 100
+		offset := 0
+		if v := r.URL.Query().Get("limit"); v != "" {
+			if n, err := strconv.Atoi(v); err == nil && n > 0 {
+				limit = n
+			}
+		}
+		if v := r.URL.Query().Get("offset"); v != "" {
+			if n, err := strconv.Atoi(v); err == nil && n >= 0 {
+				offset = n
+			}
+		}
+		users, err := userRepo.FindAll(r.Context(), limit, offset)
+		if err != nil {
+			w.WriteHeader(http.StatusInternalServerError)
+			w.Write([]byte(`{"error":"failed to fetch users"}`))
+			return
+		}
+		total, _ := userRepo.CountAll(r.Context())
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		type Resp struct {
+			Users  []*domain.User `json:"users"`
+			Total  int            `json:"total"`
+			Limit  int            `json:"limit"`
+			Offset int            `json:"offset"`
+		}
+		b, _ := json.Marshal(Resp{Users: users, Total: total, Limit: limit, Offset: offset})
+		w.Write(b)
+	}).Methods("GET")
+	admin.HandleFunc("/users/{id}", func(w http.ResponseWriter, r *http.Request) {
+		ut, _ := middleware.UserTypeFromContext(r.Context())
+		if ut != "admin" {
+			w.WriteHeader(http.StatusForbidden)
+			w.Write([]byte(`{"error":"admin access required"}`))
+			return
+		}
+		vars := mux.Vars(r)
+		id, err := uuid.Parse(vars["id"])
+		if err != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			w.Write([]byte(`{"error":"invalid user id"}`))
+			return
+		}
+		u, err := userRepo.FindByID(r.Context(), id)
+		if err != nil {
+			w.WriteHeader(http.StatusNotFound)
+			w.Write([]byte(`{"error":"user not found"}`))
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		b, _ := json.Marshal(u)
+		w.Write(b)
+	}).Methods("GET")
+	admin.HandleFunc("/transactions", func(w http.ResponseWriter, r *http.Request) {
+		ut, _ := middleware.UserTypeFromContext(r.Context())
+		if ut != "admin" {
+			w.WriteHeader(http.StatusForbidden)
+			w.Write([]byte(`{"error":"admin access required"}`))
+			return
+		}
+		limit := 100
+		offset := 0
+		if v := r.URL.Query().Get("limit"); v != "" {
+			if n, err := strconv.Atoi(v); err == nil && n > 0 {
+				limit = n
+			}
+		}
+		if v := r.URL.Query().Get("offset"); v != "" {
+			if n, err := strconv.Atoi(v); err == nil && n >= 0 {
+				offset = n
+			}
+		}
+		txs, err := txRepo.FindAll(r.Context(), limit, offset)
+		if err != nil {
+			w.WriteHeader(http.StatusInternalServerError)
+			w.Write([]byte(`{"error":"failed to fetch transactions"}`))
+			return
+		}
+		total, _ := txRepo.CountAll(r.Context())
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		type Resp struct {
+			Transactions []*domain.Transaction `json:"transactions"`
+			Total        int                   `json:"total"`
+			Limit        int                   `json:"limit"`
+			Offset       int                   `json:"offset"`
+		}
+		b, _ := json.Marshal(Resp{Transactions: txs, Total: total, Limit: limit, Offset: offset})
+		w.Write(b)
+	}).Methods("GET")
+	admin.HandleFunc("/banking/accounts", func(w http.ResponseWriter, r *http.Request) {
+		ut, _ := middleware.UserTypeFromContext(r.Context())
+		if ut != "admin" {
+			w.WriteHeader(http.StatusForbidden)
+			w.Write([]byte(`{"error":"admin access required"}`))
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"accounts":[]}`))
+	}).Methods("GET")
+	admin.HandleFunc("/banking/gateways", func(w http.ResponseWriter, r *http.Request) {
+		ut, _ := middleware.UserTypeFromContext(r.Context())
+		if ut != "admin" {
+			w.WriteHeader(http.StatusForbidden)
+			w.Write([]byte(`{"error":"admin access required"}`))
+			return
+		}
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"gateways":[]}`))
+	}).Methods("GET")
+	admin.HandleFunc("/blockchain/wallets", func(w http.ResponseWriter, r *http.Request) {
+		ut, _ := middleware.UserTypeFromContext(r.Context())
+		if ut != "admin" {
+			w.WriteHeader(http.StatusForbidden)
+			w.Write([]byte(`{"error":"admin access required"}`))
+			return
+		}
+		limit := 50
+		offset := 0
+		if v := r.URL.Query().Get("limit"); v != "" {
+			if n, err := strconv.Atoi(v); err == nil && n > 0 {
+				limit = n
+			}
+		}
+		if v := r.URL.Query().Get("offset"); v != "" {
+			if n, err := strconv.Atoi(v); err == nil && n >= 0 {
+				offset = n
+			}
+		}
+		type WalletAddr struct {
+			ID            uuid.UUID           `json:"id"`
+			UserID        uuid.UUID           `json:"user_id"`
+			WalletAddress *string             `json:"wallet_address,omitempty"`
+			Currency      domain.Currency     `json:"currency"`
+			Status        domain.WalletStatus `json:"status"`
+			CreatedAt     time.Time           `json:"created_at"`
+		}
+		all := make([]WalletAddr, 0, limit)
+		users, _ := userRepo.FindAll(r.Context(), 1000, 0)
+		for _, u := range users {
+			ws, _ := walletRepo.FindByUserID(r.Context(), u.ID)
+			for _, w := range ws {
+				all = append(all, WalletAddr{
+					ID:            w.ID,
+					UserID:        w.UserID,
+					WalletAddress: w.WalletAddress,
+					Currency:      w.Currency,
+					Status:        w.Status,
+					CreatedAt:     w.CreatedAt,
+				})
+			}
+		}
+		if offset > len(all) {
+			offset = len(all)
+		}
+		end := offset + limit
+		if end > len(all) {
+			end = len(all)
+		}
+		page := all[offset:end]
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		type Resp struct {
+			Addresses []WalletAddr `json:"addresses"`
+			Total     int          `json:"total"`
+		}
+		b, _ := json.Marshal(Resp{Addresses: page, Total: len(all)})
+		w.Write(b)
+	}).Methods("GET")
 
 	payments := api.PathPrefix("/payments").Subrouter()
 	payments.Use(idemMW.Require)

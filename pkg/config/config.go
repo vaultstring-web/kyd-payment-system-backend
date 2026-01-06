@@ -11,12 +11,14 @@ import (
 )
 
 type Config struct {
-	Server   ServerConfig
-	Database DatabaseConfig
-	Redis    RedisConfig
-	JWT      JWTConfig
-	Stellar  StellarConfig
-	Ripple   RippleConfig
+	Server       ServerConfig
+	Database     DatabaseConfig
+	Redis        RedisConfig
+	JWT          JWTConfig
+	Stellar      StellarConfig
+	Ripple       RippleConfig
+	Email        EmailConfig
+	Verification VerificationConfig
 }
 
 type ServerConfig struct {
@@ -57,6 +59,20 @@ type RippleConfig struct {
 	SecretKey     string
 }
 
+type EmailConfig struct {
+	SMTPHost     string
+	SMTPPort     int
+	SMTPUsername string
+	SMTPPassword string
+	SMTPFrom     string
+	SMTPUseTLS   bool
+}
+
+type VerificationConfig struct {
+	BaseURL         string
+	TokenExpiration time.Duration
+}
+
 func Load() *Config {
 	return &Config{
 		Server: ServerConfig{
@@ -80,6 +96,18 @@ func Load() *Config {
 		JWT: JWTConfig{
 			Secret:     getEnv("JWT_SECRET", "change-this-secret"),
 			Expiration: getDurationEnv("JWT_EXPIRATION", 15*time.Minute),
+		},
+		Email: EmailConfig{
+			SMTPHost:     getEnv("SMTP_HOST", "smtp.gmail.com"),
+			SMTPPort:     getIntEnv("SMTP_PORT", 587),
+			SMTPUsername: getEnv("SMTP_USERNAME", ""),
+			SMTPPassword: getEnv("SMTP_PASSWORD", ""),
+			SMTPFrom:     getEnv("SMTP_FROM", ""),
+			SMTPUseTLS:   getBoolEnv("SMTP_USE_TLS", true),
+		},
+		Verification: VerificationConfig{
+			BaseURL:         getEnv("VERIFICATION_BASE_URL", "http://localhost:9000/api/v1/auth/verify"),
+			TokenExpiration: getDurationEnv("EMAIL_VERIFICATION_EXPIRATION", 24*time.Hour),
 		},
 		Stellar: StellarConfig{
 			NetworkURL:    getEnv("STELLAR_NETWORK_URL", "https://horizon-testnet.stellar.org"),
@@ -125,6 +153,18 @@ func getDurationEnv(key string, defaultValue time.Duration) time.Duration {
 	if value := os.Getenv(key); value != "" {
 		if duration, err := time.ParseDuration(value); err == nil {
 			return duration
+		}
+	}
+	return defaultValue
+}
+
+func getBoolEnv(key string, defaultValue bool) bool {
+	if value := os.Getenv(key); value != "" {
+		switch strings.ToLower(strings.TrimSpace(value)) {
+		case "1", "true", "yes", "y", "on":
+			return true
+		case "0", "false", "no", "n", "off":
+			return false
 		}
 	}
 	return defaultValue

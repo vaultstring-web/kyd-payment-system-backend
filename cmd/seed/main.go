@@ -52,19 +52,31 @@ func main() {
 
 	// Ensure John exists and has MWK wallet funded
 	johnID := ensureUser(ctx, userRepo, log, email, password, phone, first, last, country, domain.UserTypeIndividual, domain.KYCStatusVerified, 1)
+	resetLoginSecurity(ctx, userRepo, log, johnID)
 	ensureWallet(ctx, walletRepo, log, johnID, domain.MWK, decimal.NewFromInt(1_000_000))
 	purgeForeignCurrencyWallets(ctx, walletRepo, txRepo, log, johnID, domain.MWK)
 
 	// Ensure Wang exists and has CNY wallet funded
 	wEmail := getenv("SEED_WANG_EMAIL", "wang.wei@example.com")
 	wPass := getenv("SEED_WANG_PASSWORD", "Password123")
-	wPhone := getenv("SEED_WANG_PHONE", "+86 13800138000")
+	wPhone := getenv("SEED_WANG_PHONE", "+8613800138000")
 	wFirst := getenv("SEED_WANG_FIRST", "Wang")
 	wLast := getenv("SEED_WANG_LAST", "Wei")
 	wCountry := getenv("SEED_WANG_COUNTRY", "CN")
 	wangID := ensureUser(ctx, userRepo, log, wEmail, wPass, wPhone, wFirst, wLast, wCountry, domain.UserTypeMerchant, domain.KYCStatusPending, 0)
+	resetLoginSecurity(ctx, userRepo, log, wangID)
 	ensureWallet(ctx, walletRepo, log, wangID, domain.CNY, decimal.NewFromInt(10_000))
 	purgeForeignCurrencyWallets(ctx, walletRepo, txRepo, log, wangID, domain.CNY)
+
+	// Ensure Admin exists for dashboard access
+	aEmail := getenv("SEED_ADMIN_EMAIL", "admin@example.com")
+	aPass := getenv("SEED_ADMIN_PASSWORD", "Password123")
+	aPhone := getenv("SEED_ADMIN_PHONE", "+265880000000")
+	aFirst := getenv("SEED_ADMIN_FIRST", "System")
+	aLast := getenv("SEED_ADMIN_LAST", "Admin")
+	aCountry := getenv("SEED_ADMIN_COUNTRY", "MW")
+	adminID := ensureUser(ctx, userRepo, log, aEmail, aPass, aPhone, aFirst, aLast, aCountry, domain.UserTypeAdmin, domain.KYCStatusVerified, 3)
+	resetLoginSecurity(ctx, userRepo, log, adminID)
 
 	fmt.Println("OK: users and wallets seeded")
 }
@@ -180,4 +192,12 @@ func purgeForeignCurrencyWallets(ctx context.Context, repo *postgres.WalletRepos
 			log.Info("Deleted non-home-currency wallet", map[string]interface{}{"user_id": userID, "currency": w.Currency})
 		}
 	}
+}
+
+func resetLoginSecurity(ctx context.Context, repo *postgres.UserRepository, log logger.Logger, userID uuid.UUID) {
+	if err := repo.UpdateLoginSecurity(ctx, userID, 0, nil); err != nil {
+		log.Error("Reset login security failed", map[string]interface{}{"error": err.Error(), "user_id": userID})
+		return
+	}
+	log.Info("Reset login security", map[string]interface{}{"user_id": userID})
 }

@@ -68,11 +68,28 @@ func (h *ForexHandler) GetRateQuery(w http.ResponseWriter, r *http.Request) {
 
 // GetAllRates returns all available FX rates.
 func (h *ForexHandler) GetAllRates(w http.ResponseWriter, r *http.Request) {
-	_ = r
-	// TODO: Implement get all rates
-	h.respondJSON(w, http.StatusOK, map[string]interface{}{
-		"rates": []interface{}{},
-	})
+	pairs := []struct {
+		from domain.Currency
+		to   domain.Currency
+	}{
+		{domain.MWK, domain.CNY},
+		{domain.CNY, domain.MWK},
+		{domain.MWK, domain.USD},
+		{domain.USD, domain.MWK},
+		{domain.CNY, domain.USD},
+		{domain.USD, domain.CNY},
+	}
+
+	var rates []*domain.ExchangeRate
+	for _, p := range pairs {
+		rate, err := h.service.GetRate(r.Context(), p.from, p.to)
+		if err != nil {
+			continue
+		}
+		rates = append(rates, rate)
+	}
+
+	h.respondJSON(w, http.StatusOK, map[string]interface{}{"rates": rates})
 }
 
 // Calculate computes a conversion for a currency pair.

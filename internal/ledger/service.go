@@ -39,7 +39,7 @@ func (s *Service) PostTransaction(ctx context.Context, posting *LedgerPosting) e
 	for _, walletID := range walletIDs {
 		var balance decimal.Decimal
 		err := tx.QueryRowContext(ctx,
-			`SELECT available_balance FROM wallets WHERE id = $1 FOR UPDATE`,
+			`SELECT available_balance FROM customer_schema.wallets WHERE id = $1 FOR UPDATE`,
 			walletID,
 		).Scan(&balance)
 		if err != nil {
@@ -49,7 +49,7 @@ func (s *Service) PostTransaction(ctx context.Context, posting *LedgerPosting) e
 
 	// Debit sender wallet
 	result, err := tx.ExecContext(ctx, `
-		UPDATE wallets 
+		UPDATE customer_schema.wallets 
 		SET 
 			available_balance = available_balance - $1,
 			ledger_balance = ledger_balance - $1,
@@ -71,7 +71,7 @@ func (s *Service) PostTransaction(ctx context.Context, posting *LedgerPosting) e
 
 	// Credit receiver wallet
 	_, err = tx.ExecContext(ctx, `
-		UPDATE wallets 
+		UPDATE customer_schema.wallets 
 		SET 
 			available_balance = available_balance + $1,
 			ledger_balance = ledger_balance + $1,
@@ -86,12 +86,12 @@ func (s *Service) PostTransaction(ctx context.Context, posting *LedgerPosting) e
 
 	// Create ledger entries (immutable audit trail)
 	_, err = tx.ExecContext(ctx, `
-		INSERT INTO ledger_entries (
+		INSERT INTO customer_schema.ledger_entries (
 			id, transaction_id, wallet_id, entry_type, 
 			amount, currency, balance_after, created_at
 		) VALUES 
 		($1, $2, $3, 'debit', $4, $5, 
-			(SELECT available_balance FROM wallets WHERE id = $3), NOW())
+			(SELECT available_balance FROM customer_schema.wallets WHERE id = $3), NOW())
 	`,
 		uuid.New(), posting.TransactionID, posting.DebitWalletID,
 		posting.DebitAmount, posting.Currency,
@@ -100,12 +100,12 @@ func (s *Service) PostTransaction(ctx context.Context, posting *LedgerPosting) e
 		return errors.Wrap(err, "insert debit ledger entry failed")
 	}
 	_, err = tx.ExecContext(ctx, `
-		INSERT INTO ledger_entries (
+		INSERT INTO customer_schema.ledger_entries (
 			id, transaction_id, wallet_id, entry_type, 
 			amount, currency, balance_after, created_at
 		) VALUES 
 		($1, $2, $3, 'credit', $4, $5, 
-			(SELECT available_balance FROM wallets WHERE id = $3), NOW())
+			(SELECT available_balance FROM customer_schema.wallets WHERE id = $3), NOW())
 	`,
 		uuid.New(), posting.TransactionID, posting.CreditWalletID,
 		posting.CreditAmount, posting.ConvertedCurrency,

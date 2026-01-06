@@ -7,10 +7,11 @@ import (
 	"context"
 	"database/sql"
 
-	"github.com/google/uuid"
-	"github.com/jmoiron/sqlx"
 	"kyd/internal/domain"
 	"kyd/pkg/errors"
+
+	"github.com/google/uuid"
+	"github.com/jmoiron/sqlx"
 )
 
 type SettlementRepository struct {
@@ -23,7 +24,7 @@ func NewSettlementRepository(db *sqlx.DB) *SettlementRepository {
 
 func (r *SettlementRepository) Create(ctx context.Context, settlement *domain.Settlement) error {
 	query := `
-		INSERT INTO settlements (
+		INSERT INTO customer_schema.settlements (
 			id, batch_reference, network, transaction_hash, source_account,
 			destination_account, total_amount, currency, fee_amount, fee_currency,
 			status, submission_count, last_submitted_at, confirmed_at, completed_at,
@@ -47,7 +48,7 @@ func (r *SettlementRepository) Create(ctx context.Context, settlement *domain.Se
 
 func (r *SettlementRepository) Update(ctx context.Context, settlement *domain.Settlement) error {
 	query := `
-		UPDATE settlements SET
+		UPDATE customer_schema.settlements SET
 			transaction_hash = $1, status = $2, submission_count = $3,
 			last_submitted_at = $4, confirmed_at = $5, completed_at = $6,
 			metadata = $7, updated_at = $8
@@ -65,7 +66,7 @@ func (r *SettlementRepository) Update(ctx context.Context, settlement *domain.Se
 
 func (r *SettlementRepository) FindByID(ctx context.Context, id uuid.UUID) (*domain.Settlement, error) {
 	var settlement domain.Settlement
-	query := `SELECT * FROM settlements WHERE id = $1`
+	query := `SELECT * FROM customer_schema.settlements WHERE id = $1`
 
 	err := r.db.GetContext(ctx, &settlement, query, id)
 	if err == sql.ErrNoRows {

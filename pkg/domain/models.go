@@ -46,7 +46,10 @@ type User struct {
 	BusinessRegistration *string         `json:"business_registration,omitempty" db:"business_registration"`
 	RiskScore            decimal.Decimal `json:"risk_score" db:"risk_score"`
 	IsActive             bool            `json:"is_active" db:"is_active"`
+	EmailVerified        bool            `json:"email_verified" db:"email_verified"`
 	LastLogin            *time.Time      `json:"last_login,omitempty" db:"last_login"`
+	FailedLoginAttempts  int             `json:"failed_login_attempts" db:"failed_login_attempts"`
+	LockedUntil          *time.Time      `json:"locked_until,omitempty" db:"locked_until"`
 	CreatedAt            time.Time       `json:"created_at" db:"created_at"`
 	UpdatedAt            time.Time       `json:"updated_at" db:"updated_at"`
 }
@@ -227,3 +230,20 @@ const (
 	SettlementStatusFailed     SettlementStatus = "failed"
 	SettlementStatusReconciled SettlementStatus = "reconciled"
 )
+
+// AuditLog represents a system audit log entry
+type AuditLog struct {
+	ID          uuid.UUID  `json:"id" db:"id"`
+	UserID      *uuid.UUID `json:"user_id,omitempty" db:"user_id"`
+	Action      string     `json:"action" db:"action"`
+	EntityType  *string    `json:"entity_type,omitempty" db:"entity_type"`
+	EntityID    *uuid.UUID `json:"entity_id,omitempty" db:"entity_id"`
+	OldValues   *Metadata  `json:"old_values,omitempty" db:"old_values"`
+	NewValues   *Metadata  `json:"new_values,omitempty" db:"new_values"`
+	IPAddress   *string    `json:"ip_address,omitempty" db:"ip_address"`
+	UserAgent   *string    `json:"user_agent,omitempty" db:"user_agent"`
+	RequestID   *string    `json:"request_id,omitempty" db:"request_id"`
+	StatusCode  *int       `json:"status_code,omitempty" db:"status_code"`
+	ErrorMessage *string   `json:"error_message,omitempty" db:"error_message"`
+	CreatedAt   time.Time  `json:"created_at" db:"created_at"`
+}
