@@ -25,6 +25,17 @@ func (r *ForexRepository) CreateRate(ctx context.Context, rate *domain.ExchangeR
 			id, base_currency, target_currency, rate, buy_rate, sell_rate,
 			source, provider, is_interbank, spread, valid_from, valid_to, created_at
 		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
+		ON CONFLICT (base_currency, target_currency, valid_from)
+		DO UPDATE SET
+			rate = EXCLUDED.rate,
+			buy_rate = EXCLUDED.buy_rate,
+			sell_rate = EXCLUDED.sell_rate,
+			source = EXCLUDED.source,
+			provider = EXCLUDED.provider,
+			is_interbank = EXCLUDED.is_interbank,
+			spread = EXCLUDED.spread,
+			valid_to = EXCLUDED.valid_to,
+			created_at = EXCLUDED.created_at
 	`
 
 	_, err := r.db.ExecContext(ctx, query,

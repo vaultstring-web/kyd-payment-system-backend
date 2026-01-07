@@ -65,6 +65,31 @@ func (r *UserRepository) FindByID(ctx context.Context, id uuid.UUID) (*domain.Us
 	return &user, nil
 }
 
+// FindByIDs fetches multiple users by their IDs in a single query.
+func (r *UserRepository) FindByIDs(ctx context.Context, ids []uuid.UUID) ([]*domain.User, error) {
+	if len(ids) == 0 {
+		return []*domain.User{}, nil
+	}
+	var users []*domain.User
+	query := `
+		SELECT 
+			id, email, phone, first_name, last_name, user_type, kyc_level, kyc_status,
+			country_code, date_of_birth, business_name, risk_score, is_active,
+			failed_login_attempts, locked_until, last_login, created_at, updated_at
+		FROM customer_schema.users
+		WHERE id = ANY($1)
+	`
+	_, err := r.db.PreparexContext(ctx, query)
+	if err != nil {
+		// Continue even if prepare fails; sqlx.Select can execute directly
+	}
+	err = r.db.SelectContext(ctx, &users, query, ids)
+	if err != nil {
+		return nil, errors.Wrap(err, "failed to fetch users by ids")
+	}
+	return users, nil
+}
+
 func (r *UserRepository) FindByEmail(ctx context.Context, email string) (*domain.User, error) {
 	var user domain.User
 	query := `SELECT * FROM customer_schema.users WHERE email = $1`

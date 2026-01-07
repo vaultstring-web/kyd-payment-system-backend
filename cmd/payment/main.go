@@ -86,6 +86,7 @@ func main() {
 	walletRepo := postgres.NewWalletRepository(db)
 	forexRepo := postgres.NewForexRepository(db)
 	userRepo := postgres.NewUserRepository(db)
+	settlementRepo := postgres.NewSettlementRepository(db)
 
 	// Initialize services
 	ledgerService := ledger.NewService(db.DB)
@@ -223,13 +224,130 @@ func main() {
 		total, _ := txRepo.CountAll(r.Context())
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
-		type Resp struct {
-			Transactions []*domain.Transaction `json:"transactions"`
-			Total        int                   `json:"total"`
-			Limit        int                   `json:"limit"`
-			Offset       int                   `json:"offset"`
+		type AdminTx struct {
+			ID               uuid.UUID                `json:"id"`
+			TransactionID    *uuid.UUID               `json:"transaction_id,omitempty"`
+			SenderID         uuid.UUID                `json:"sender_id"`
+			ReceiverID       uuid.UUID                `json:"receiver_id"`
+			SenderUserType   domain.UserType          `json:"sender_user_type"`
+			ReceiverUserType domain.UserType          `json:"receiver_user_type"`
+			SenderName       *string                  `json:"sender_name,omitempty"`
+			SenderEmail      *string                  `json:"sender_email,omitempty"`
+			ReceiverName     *string                  `json:"receiver_name,omitempty"`
+			ReceiverEmail    *string                  `json:"receiver_email,omitempty"`
+			Amount           domain.Money             `json:"amount"`
+			Status           domain.TransactionStatus `json:"status"`
+			TransactionType  domain.TransactionType   `json:"transaction_type"`
+			StatusReason     *string                  `json:"status_reason,omitempty"`
+			Reference        string                   `json:"reference"`
+			CreatedAt        time.Time                `json:"created_at"`
+			UpdatedAt        time.Time                `json:"updated_at"`
+			Flagged          bool                     `json:"flagged"`
 		}
-		b, _ := json.Marshal(Resp{Transactions: txs, Total: total, Limit: limit, Offset: offset})
+		ids := make([]uuid.UUID, 0, len(txs)*2)
+		idSeen := make(map[uuid.UUID]struct{})
+		for _, t := range txs {
+			if _, ok := idSeen[t.SenderID]; !ok {
+				ids = append(ids, t.SenderID)
+				idSeen[t.SenderID] = struct{}{}
+			}
+			if _, ok := idSeen[t.ReceiverID]; !ok {
+				ids = append(ids, t.ReceiverID)
+				idSeen[t.ReceiverID] = struct{}{}
+			}
+		}
+		users, _ := userRepo.FindByIDs(r.Context(), ids)
+		userMap := make(map[uuid.UUID]*domain.User, len(users))
+		for _, u := range users {
+			userMap[u.ID] = u
+		}
+		out := make([]AdminTx, 0, len(txs))
+		for _, t := range txs {
+			var sender *domain.User = userMap[t.SenderID]
+			var receiver *domain.User = userMap[t.ReceiverID]
+			var sName *string
+			var sEmail *string
+			var rName *string
+			var rEmail *string
+			var sType domain.UserType
+			var rType domain.UserType
+			if sender != nil {
+				name := sender.FirstName + " " + sender.LastName
+				sName = &name
+				email := sender.Email
+				sEmail = &email
+				sType = sender.UserType
+			}
+			if receiver != nil {
+				name := receiver.FirstName + " " + receiver.LastName
+				rName = &name
+				email := receiver.Email
+				rEmail = &email
+				rType = receiver.UserType
+			}
+			amt := domain.Money{Amount: t.Amount, Currency: t.Currency}
+			out = append(out, AdminTx{
+				ID:               t.ID,
+				SenderID:         t.SenderID,
+				ReceiverID:       t.ReceiverID,
+				SenderUserType:   sType,
+				ReceiverUserType: rType,
+				SenderName:       sName,
+				SenderEmail:      sEmail,
+				ReceiverName:     rName,
+				ReceiverEmail:    rEmail,
+				Amount:           amt,
+				Status:           t.Status,
+				TransactionType:  t.TransactionType,
+				StatusReason:     t.StatusReason,
+				Reference:        t.Reference,
+				CreatedAt:        t.CreatedAt,
+				UpdatedAt:        t.UpdatedAt,
+				Flagged:          t.Status == domain.TransactionStatusFailed,
+			})
+		}
+		type Resp struct {
+			Transactions []AdminTx `json:"transactions"`
+			Total        int       `json:"total"`
+			Limit        int       `json:"limit"`
+			Offset       int       `json:"offset"`
+		}
+		b, _ := json.Marshal(Resp{Transactions: out, Total: total, Limit: limit, Offset: offset})
+		w.Write(b)
+	}).Methods("GET")
+	admin.HandleFunc("/banking/settlements", func(w http.ResponseWriter, r *http.Request) {
+		ut, _ := middleware.UserTypeFromContext(r.Context())
+		if ut != "admin" {
+			w.WriteHeader(http.StatusForbidden)
+			w.Write([]byte(`{"error":"admin access required"}`))
+			return
+		}
+		limit := 50
+		offset := 0
+		if v := r.URL.Query().Get("limit"); v != "" {
+			if n, err := strconv.Atoi(v); err == nil && n > 0 {
+				limit = n
+			}
+		}
+		if v := r.URL.Query().Get("offset"); v != "" {
+			if n, err := strconv.Atoi(v); err == nil && n >= 0 {
+				offset = n
+			}
+		}
+		s, err := settlementRepo.FindAll(r.Context(), limit, offset)
+		if err != nil {
+			w.WriteHeader(http.StatusInternalServerError)
+			w.Write([]byte(`{"error":"failed to fetch settlements"}`))
+			return
+		}
+		total, _ := settlementRepo.CountAll(r.Context())
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		type Resp struct {
+			Settlements []domain.Settlement `json:"settlements"`
+			Total       int                 `json:"total"`
+		}
+		b, _ := json.Marshal(Resp{Settlements: s, Total: total})
 		w.Write(b)
 	}).Methods("GET")
 	admin.HandleFunc("/banking/accounts", func(w http.ResponseWriter, r *http.Request) {
@@ -241,7 +359,43 @@ func main() {
 		}
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
-		w.Write([]byte(`{"accounts":[]}`))
+		type BankAccount struct {
+			ID            string    `json:"id"`
+			BankName      string    `json:"bank_name"`
+			AccountNumber string    `json:"account_number"`
+			AccountHolder string    `json:"account_holder"`
+			Currency      string    `json:"currency"`
+			Balance       float64   `json:"balance"`
+			Status        string    `json:"status"`
+			ConnectedAt   time.Time `json:"connected_at"`
+		}
+		accounts := []BankAccount{
+			{
+				ID:            "mwk-primary",
+				BankName:      "National Bank of Malawi",
+				AccountNumber: "000123456789",
+				AccountHolder: "KYD Operations",
+				Currency:      "MWK",
+				Balance:       12500000,
+				Status:        "active",
+				ConnectedAt:   time.Now().Add(-48 * time.Hour),
+			},
+			{
+				ID:            "cny-settlement",
+				BankName:      "Bank of China",
+				AccountNumber: "987654321000",
+				AccountHolder: "KYD Operations",
+				Currency:      "CNY",
+				Balance:       3200000,
+				Status:        "active",
+				ConnectedAt:   time.Now().Add(-72 * time.Hour),
+			},
+		}
+		type Resp struct {
+			Accounts []BankAccount `json:"accounts"`
+		}
+		b, _ := json.Marshal(Resp{Accounts: accounts})
+		w.Write(b)
 	}).Methods("GET")
 	admin.HandleFunc("/banking/gateways", func(w http.ResponseWriter, r *http.Request) {
 		ut, _ := middleware.UserTypeFromContext(r.Context())
@@ -252,7 +406,40 @@ func main() {
 		}
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
-		w.Write([]byte(`{"gateways":[]}`))
+		type PaymentGateway struct {
+			ID         string    `json:"id"`
+			Name       string    `json:"name"`
+			Provider   string    `json:"provider"`
+			Status     string    `json:"status"`
+			APIKey     string    `json:"api_key"`
+			WebhookURL string    `json:"webhook_url"`
+			LastSync   time.Time `json:"last_sync"`
+		}
+		gateways := []PaymentGateway{
+			{
+				ID:         "mwk-bank",
+				Name:       "Malawi Bank Transfer",
+				Provider:   "LocalBank",
+				Status:     "active",
+				APIKey:     "masked",
+				WebhookURL: "https://api.localbank.example/webhook",
+				LastSync:   time.Now().Add(-30 * time.Minute),
+			},
+			{
+				ID:         "cny-unionpay",
+				Name:       "UnionPay",
+				Provider:   "UnionPay",
+				Status:     "active",
+				APIKey:     "masked",
+				WebhookURL: "https://api.unionpay.example/webhook",
+				LastSync:   time.Now().Add(-2 * time.Hour),
+			},
+		}
+		type Resp struct {
+			Gateways []PaymentGateway `json:"gateways"`
+		}
+		b, _ := json.Marshal(Resp{Gateways: gateways})
+		w.Write(b)
 	}).Methods("GET")
 	admin.HandleFunc("/blockchain/wallets", func(w http.ResponseWriter, r *http.Request) {
 		ut, _ := middleware.UserTypeFromContext(r.Context())

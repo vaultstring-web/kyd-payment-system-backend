@@ -32,11 +32,11 @@ type Gateway struct {
 
 func NewGateway(log logger.Logger) *Gateway {
 	return &Gateway{
-		authProxy:       createReverseProxy("http://localhost:3000"),
-		paymentProxy:    createReverseProxy("http://localhost:3001"),
-		walletProxy:     createReverseProxy("http://localhost:3003"),
-		forexProxy:      createReverseProxy("http://localhost:3002"),
-		settlementProxy: createReverseProxy("http://localhost:3004"),
+		authProxy:       createReverseProxy("http://127.0.0.1:3000"),
+		paymentProxy:    createReverseProxy("http://127.0.0.1:3001"),
+		walletProxy:     createReverseProxy("http://127.0.0.1:3003"),
+		forexProxy:      createReverseProxy("http://127.0.0.1:3002"),
+		settlementProxy: createReverseProxy("http://127.0.0.1:3004"),
 		logger:          log,
 	}
 }

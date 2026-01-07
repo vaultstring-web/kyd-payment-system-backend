@@ -78,3 +78,32 @@ func (r *SettlementRepository) FindByID(ctx context.Context, id uuid.UUID) (*dom
 
 	return &settlement, nil
 }
+
+func (r *SettlementRepository) FindAll(ctx context.Context, limit, offset int) ([]domain.Settlement, error) {
+	var settlements []domain.Settlement
+	query := `
+		SELECT 
+			id, batch_reference, network, transaction_hash, source_account,
+			destination_account, total_amount, currency, fee_amount, fee_currency,
+			status, submission_count, last_submitted_at, confirmed_at, completed_at,
+			metadata, created_at, updated_at
+		FROM customer_schema.settlements
+		ORDER BY created_at DESC
+		LIMIT $1 OFFSET $2
+	`
+	err := r.db.SelectContext(ctx, &settlements, query, limit, offset)
+	if err != nil {
+		return nil, errors.Wrap(err, "failed to list settlements")
+	}
+	return settlements, nil
+}
+
+func (r *SettlementRepository) CountAll(ctx context.Context) (int, error) {
+	var total int
+	query := `SELECT COUNT(*) FROM customer_schema.settlements`
+	err := r.db.GetContext(ctx, &total, query)
+	if err != nil {
+		return 0, errors.Wrap(err, "failed to count settlements")
+	}
+	return total, nil
+}

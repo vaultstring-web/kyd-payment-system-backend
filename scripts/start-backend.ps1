@@ -89,6 +89,84 @@ function Start-MonitoredService {
     Write-Host "  + Started monitor for $name (Port $port) -> logs/$name.log" -ForegroundColor Green
 }
 
+function Test-ServiceHealth {
+    param(
+        [string]$name,
+        [string]$url,
+        [int]$maxAttempts = 20,
+        [int]$delaySeconds = 1
+    )
+    $attempt = 0
+    while ($attempt -lt $maxAttempts) {
+        try {
+            $resp = Invoke-WebRequest -UseBasicParsing -Uri $url -Method GET -TimeoutSec 3
+            if ($resp.StatusCode -eq 200) {
+                Write-Host "  OK: $name healthy at $url" -ForegroundColor Green
+                return $true
+            }
+        } catch {
+        }
+        Start-Sleep -Seconds $delaySeconds
+        $attempt++
+    }
+    Write-Warning "  WARN: $name not healthy at $url after $maxAttempts attempts"
+    return $false
+}
+
+function Test-TcpPort {
+    param(
+        [string]$name,
+        [string]$tcpHost = "127.0.0.1",
+        [int]$port,
+        [int]$maxAttempts = 30,
+        [int]$delaySeconds = 1
+    )
+    $attempt = 0
+    while ($attempt -lt $maxAttempts) {
+        $conn = Test-NetConnection -ComputerName $tcpHost -Port $port -InformationLevel Quiet
+        if ($conn) {
+            Write-Host ("  OK: {0} reachable on {1}:{2}" -f $name, $tcpHost, $port) -ForegroundColor Green
+            return $true
+        }
+        Start-Sleep -Seconds $delaySeconds
+        $attempt++
+    }
+    Write-Warning ("  WARN: {0} not reachable on {1}:{2} after {3} attempts" -f $name, $tcpHost, $port, $maxAttempts)
+    return $false
+}
+
+function Wait-ForDatabase {
+    param([int]$port = 5432)
+    Write-Host "Waiting for Postgres to accept connections..." -ForegroundColor Yellow
+    $ready = Test-TcpPort -name "postgres" -tcpHost "127.0.0.1" -port $port -maxAttempts 60 -delaySeconds 1
+    if (-not $ready) {
+        Write-Warning "Postgres did not become ready in time; migrations/seed may fail."
+    }
+}
+
+function Wait-ServiceHealthy {
+    param(
+        [string]$containerName,
+        [int]$maxAttempts = 60,
+        [int]$delaySeconds = 2
+    )
+    $attempt = 0
+    while ($attempt -lt $maxAttempts) {
+        try {
+            $status = docker inspect -f "{{.State.Health.Status}}" $containerName 2>$null
+            if ($status -and $status.Trim() -eq "healthy") {
+                Write-Host ("  OK: {0} is healthy" -f $containerName) -ForegroundColor Green
+                return $true
+            }
+        } catch {
+        }
+        Start-Sleep -Seconds $delaySeconds
+        $attempt++
+    }
+    Write-Warning ("  WARN: {0} not healthy after {1} attempts" -f $containerName, $maxAttempts)
+    return $false
+}
+
 # ==============================================================================
 # 2. SETUP & CLEANUP
 # ==============================================================================
@@ -134,12 +212,15 @@ if (-not (Test-Path logs)) { New-Item -ItemType Directory -Path logs | Out-Null 
 # 3. INFRASTRUCTURE & BUILD
 # ==============================================================================
 
-Write-Host "Starting Database & Cache..." -ForegroundColor Yellow
+Write-Host "Starting Database and Cache..." -ForegroundColor Yellow
 docker compose up -d postgres redis
 if ($LASTEXITCODE -ne 0) { Write-Error "Failed to start Docker containers"; exit 1 }
 
-# Wait for DB readiness (simple pause)
-Start-Sleep -Seconds 3
+# Wait for container health and DB readiness
+Write-Host "Waiting for container health checks..." -ForegroundColor Yellow
+$null = Wait-ServiceHealthy -containerName "kyd-postgres" -maxAttempts 60 -delaySeconds 2
+$null = Wait-ServiceHealthy -containerName "kyd-redis" -maxAttempts 60 -delaySeconds 2
+Wait-ForDatabase -port 5432
 
 Write-Host "Building Services..." -ForegroundColor Yellow
 $builds = @(
@@ -166,6 +247,7 @@ Write-Host "Running Migrations..." -ForegroundColor Yellow
 $prevDbUrl = $env:DATABASE_URL
 # Use admin connection if possible, else fall back to default
 $migrateUrl = "postgres://kyd_admin:admin_secure_pass@localhost:5432/kyd_dev?sslmode=disable"
+$migrateUrl = $migrateUrl -replace "localhost","127.0.0.1"
 $env:DATABASE_URL = $migrateUrl
 go run ./cmd/migrate/main.go up
 if ($LASTEXITCODE -ne 0) { 
@@ -201,14 +283,23 @@ $services = @(
     @{ name='gateway';    cmd='.\build\gateway.exe';    port=$env:GATEWAY_PORT }
 )
 
-foreach ($svc in $services) {
-    Start-MonitoredService -svc $svc
-}
+foreach ($svc in $services) { Start-MonitoredService -svc $svc }
 
 Write-Host "`nALL SERVICES STARTED!" -ForegroundColor Green
 Write-Host "Gateway: http://localhost:$($env:GATEWAY_PORT)"
 Write-Host "Logs are being written to the 'logs/' directory."
 Write-Host "Press Ctrl+C to stop all services."
+
+Write-Host "`nChecking service health..." -ForegroundColor Yellow
+$null = Test-TcpPort -name "postgres" -tcpHost "127.0.0.1" -port 5432 -maxAttempts 30 -delaySeconds 1
+$null = Test-TcpPort -name "redis" -tcpHost "127.0.0.1" -port 6379 -maxAttempts 30 -delaySeconds 1
+$authHealthy = Test-ServiceHealth -name "auth" -url ("http://127.0.0.1:{0}/health" -f $env:AUTH_PORT)
+$payHealthy = Test-ServiceHealth -name "payment" -url ("http://127.0.0.1:{0}/health" -f $env:PAYMENT_PORT)
+$forexHealthy = Test-ServiceHealth -name "forex" -url ("http://127.0.0.1:{0}/health" -f $env:FOREX_PORT)
+$walletHealthy = Test-ServiceHealth -name "wallet" -url ("http://127.0.0.1:{0}/health" -f $env:WALLET_PORT)
+$settHealthy = Test-ServiceHealth -name "settlement" -url ("http://127.0.0.1:{0}/health" -f $env:SETTLEMENT_PORT)
+$gwHealthy = Test-ServiceHealth -name "gateway" -url ("http://127.0.0.1:{0}/health" -f $env:GATEWAY_PORT)
+if (-not ($authHealthy -and $gwHealthy)) { Write-Warning "Auth or Gateway not healthy; admin login may return 502. Check logs/auth.log and logs/gateway.log." }
 
 # Keep alive
 while ($true) { Start-Sleep -Seconds 60 }
