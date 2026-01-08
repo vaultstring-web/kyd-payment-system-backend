@@ -22,9 +22,17 @@ import (
 	"kyd/pkg/config"
 	"kyd/pkg/domain"
 	"kyd/pkg/logger"
+
+	"github.com/joho/godotenv"
 )
 
 func main() {
+
+	if err := godotenv.Load(); err != nil {
+		if err := godotenv.Load("../.env"); err != nil {
+			fmt.Println("Warning: Could not load .env file, using environment variables")
+		}
+	}
 	log := logger.New("seed-user")
 
 	cfg := config.Load()
