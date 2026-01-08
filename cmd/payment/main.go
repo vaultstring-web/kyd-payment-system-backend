@@ -236,6 +236,8 @@ func main() {
 			ReceiverName     *string                  `json:"receiver_name,omitempty"`
 			ReceiverEmail    *string                  `json:"receiver_email,omitempty"`
 			Amount           domain.Money             `json:"amount"`
+			Fee              domain.Money             `json:"fee"`
+			NetAmount        domain.Money             `json:"net_amount"`
 			Status           domain.TransactionStatus `json:"status"`
 			TransactionType  domain.TransactionType   `json:"transaction_type"`
 			StatusReason     *string                  `json:"status_reason,omitempty"`
@@ -286,6 +288,8 @@ func main() {
 				rType = receiver.UserType
 			}
 			amt := domain.Money{Amount: t.Amount, Currency: t.Currency}
+			fee := domain.Money{Amount: t.FeeAmount, Currency: t.FeeCurrency}
+			net := domain.Money{Amount: t.NetAmount, Currency: t.ConvertedCurrency}
 			out = append(out, AdminTx{
 				ID:               t.ID,
 				SenderID:         t.SenderID,
@@ -297,6 +301,8 @@ func main() {
 				ReceiverName:     rName,
 				ReceiverEmail:    rEmail,
 				Amount:           amt,
+				Fee:              fee,
+				NetAmount:        net,
 				Status:           t.Status,
 				TransactionType:  t.TransactionType,
 				StatusReason:     t.StatusReason,
