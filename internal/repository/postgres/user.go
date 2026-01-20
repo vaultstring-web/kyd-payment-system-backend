@@ -556,6 +556,127 @@ func (r *UserRepository) UpdateKYCStatus(ctx context.Context, userID uuid.UUID, 
 	return nil
 }
 
+// UpdateKYCStatusTx updates the user's KYC status within a transaction
+func (r *UserRepository) UpdateKYCStatusTx(ctx context.Context, tx interface{}, userID uuid.UUID, status domain.KYCStatus, profileStatus *domain.KYCSubmissionStatus) error {
+	var db sqlx.ExtContext
+	if tx == nil {
+		db = r.db
+	} else {
+		db = tx.(*SQLxTransaction).tx
+	}
+
+	// Update user kyc_status
+	userQuery := `UPDATE customer_schema.users SET kyc_status = $1, updated_at = NOW() WHERE id = $2`
+	result, err := db.ExecContext(ctx, userQuery, status, userID)
+	if err != nil {
+		return errors.Wrap(err, "failed to update user KYC status")
+	}
+
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return errors.Wrap(err, "failed to get rows affected")
+	}
+	if rows == 0 {
+		return errors.ErrUserNotFound
+	}
+
+	// Optionally update kyc_profile submission_status if provided
+	if profileStatus != nil {
+		profileQuery := `UPDATE customer_schema.kyc_profiles SET submission_status = $1, updated_at = NOW() WHERE user_id = $2`
+		_, err := db.ExecContext(ctx, profileQuery, *profileStatus, userID)
+		if err != nil {
+			return errors.Wrap(err, "failed to update KYC profile status")
+		}
+	}
+
+	return nil
+}
+
+// UpdateKYCLevelTx updates the user's KYC level within a transaction
+func (r *UserRepository) UpdateKYCLevelTx(ctx context.Context, tx interface{}, userID uuid.UUID, level int, updateProfile bool) error {
+	var db sqlx.ExtContext
+	if tx == nil {
+		db = r.db
+	} else {
+		db = tx.(*SQLxTransaction).tx
+	}
+
+	// Update user kyc_level
+	userQuery := `UPDATE customer_schema.users SET kyc_level = $1, updated_at = NOW() WHERE id = $2`
+	result, err := db.ExecContext(ctx, userQuery, level, userID)
+	if err != nil {
+		return errors.Wrap(err, "failed to update user KYC level")
+	}
+
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return errors.Wrap(err, "failed to get rows affected")
+	}
+	if rows == 0 {
+		return errors.ErrUserNotFound
+	}
+
+	// Optionally update kyc_profile kyc_level
+	if updateProfile {
+		profileQuery := `UPDATE customer_schema.kyc_profiles SET kyc_level = $1, updated_at = NOW() WHERE user_id = $2`
+		_, err := db.ExecContext(ctx, profileQuery, level, userID)
+		if err != nil {
+			return errors.Wrap(err, "failed to update KYC profile level")
+		}
+	}
+
+	return nil
+}
+
+// UpdateUserRiskScoreTx updates the user's risk score within a transaction
+func (r *UserRepository) UpdateUserRiskScoreTx(ctx context.Context, tx interface{}, userID uuid.UUID, riskScore decimal.Decimal) error {
+	var db sqlx.ExtContext
+	if tx == nil {
+		db = r.db
+	} else {
+		db = tx.(*SQLxTransaction).tx
+	}
+
+	query := `UPDATE customer_schema.users SET risk_score = $1, updated_at = NOW() WHERE id = $2`
+
+	result, err := db.ExecContext(ctx, query, riskScore, userID)
+	if err != nil {
+		return errors.Wrap(err, "failed to update user risk score")
+	}
+
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return errors.Wrap(err, "failed to get rows affected")
+	}
+	if rows == 0 {
+		return errors.ErrUserNotFound
+	}
+
+	return nil
+}
+
+// FindByIDTx finds a user by ID within a transaction
+func (r *UserRepository) FindByIDTx(ctx context.Context, tx interface{}, id uuid.UUID) (*domain.User, error) {
+	var user domain.User
+	query := `SELECT * FROM customer_schema.users WHERE id = $1`
+
+	var err error
+	if tx == nil {
+		err = r.db.GetContext(ctx, &user, query, id)
+	} else {
+		err = tx.(*SQLxTransaction).tx.GetContext(ctx, &user, query, id)
+	}
+
+	if err == sql.ErrNoRows {
+		return nil, errors.ErrUserNotFound
+	}
+	if err != nil {
+		return nil, errors.Wrap(err, "failed to find user")
+	}
+
+	return &user, nil
+}
+
 // UpdateKYCLevel updates the user's KYC level and optionally the KYC profile kyc_level
 func (r *UserRepository) UpdateKYCLevel(ctx context.Context, userID uuid.UUID, level int, updateProfile bool) error {
 	// Start a transaction

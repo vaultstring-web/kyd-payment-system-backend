@@ -22,6 +22,35 @@ import (
 )
 
 // ==============================================================================
+// TRANSACTION TYPES & WRAPPERS
+// ==============================================================================
+
+// SQLxTransaction wraps sqlx.Tx to implement the kyc.Transaction interface
+type SQLxTransaction struct {
+	tx *sqlx.Tx
+	id string
+}
+
+func NewSQLxTransaction(tx *sqlx.Tx) *SQLxTransaction {
+	return &SQLxTransaction{
+		tx: tx,
+		id: uuid.New().String(),
+	}
+}
+
+func (t *SQLxTransaction) Commit() error {
+	return t.tx.Commit()
+}
+
+func (t *SQLxTransaction) Rollback() error {
+	return t.tx.Rollback()
+}
+
+func (t *SQLxTransaction) GetID() string {
+	return t.id
+}
+
+// ==============================================================================
 // KYC PROFILE REPOSITORY
 // ==============================================================================
 
@@ -35,8 +64,22 @@ func NewKYCProfileRepository(db *sqlx.DB) *KYCProfileRepository {
 	return &KYCProfileRepository{db: db}
 }
 
-// Create inserts a new KYC profile
+// BeginTransaction starts a new database transaction
+func (r *KYCProfileRepository) BeginTransaction(ctx context.Context) (*SQLxTransaction, error) {
+	tx, err := r.db.BeginTxx(ctx, nil)
+	if err != nil {
+		return nil, errors.Wrap(err, "failed to begin transaction")
+	}
+	return NewSQLxTransaction(tx), nil
+}
+
+// Create inserts a new KYC profile (non-transactional)
 func (r *KYCProfileRepository) Create(ctx context.Context, profile *domain.KYCProfile) error {
+	return r.CreateProfileTx(ctx, nil, profile)
+}
+
+// CreateProfileTx creates a new KYC profile within a transaction
+func (r *KYCProfileRepository) CreateProfileTx(ctx context.Context, tx interface{}, profile *domain.KYCProfile) error {
 	query := `
 		INSERT INTO customer_schema.kyc_profiles (
 			id, user_id, profile_type, date_of_birth, place_of_birth, nationality,
@@ -61,7 +104,13 @@ func (r *KYCProfileRepository) Create(ctx context.Context, profile *domain.KYCPr
 		)
 	`
 
-	_, err := r.db.NamedExecContext(ctx, query, profile)
+	var err error
+	if tx == nil {
+		_, err = r.db.NamedExecContext(ctx, query, profile)
+	} else {
+		_, err = tx.(*SQLxTransaction).tx.NamedExecContext(ctx, query, profile)
+	}
+
 	if err != nil {
 		return errors.Wrap(err, "failed to create KYC profile")
 	}
@@ -69,8 +118,13 @@ func (r *KYCProfileRepository) Create(ctx context.Context, profile *domain.KYCPr
 	return nil
 }
 
-// Update updates an existing KYC profile
+// Update updates an existing KYC profile (non-transactional)
 func (r *KYCProfileRepository) Update(ctx context.Context, profile *domain.KYCProfile) error {
+	return r.UpdateProfileTx(ctx, nil, profile)
+}
+
+// UpdateProfileTx updates an existing KYC profile within a transaction
+func (r *KYCProfileRepository) UpdateProfileTx(ctx context.Context, tx interface{}, profile *domain.KYCProfile) error {
 	query := `
 		UPDATE customer_schema.kyc_profiles SET
 			profile_type = :profile_type,
@@ -120,7 +174,15 @@ func (r *KYCProfileRepository) Update(ctx context.Context, profile *domain.KYCPr
 		WHERE id = :id
 	`
 
-	result, err := r.db.NamedExecContext(ctx, query, profile)
+	var result sql.Result
+	var err error
+
+	if tx == nil {
+		result, err = r.db.NamedExecContext(ctx, query, profile)
+	} else {
+		result, err = tx.(*SQLxTransaction).tx.NamedExecContext(ctx, query, profile)
+	}
+
 	if err != nil {
 		return errors.Wrap(err, "failed to update KYC profile")
 	}
@@ -137,12 +199,18 @@ func (r *KYCProfileRepository) Update(ctx context.Context, profile *domain.KYCPr
 	return nil
 }
 
-// FindByID finds a KYC profile by ID
-func (r *KYCProfileRepository) FindByID(ctx context.Context, id uuid.UUID) (*domain.KYCProfile, error) {
+// FindProfileByIDTx finds a KYC profile by ID within a transaction
+func (r *KYCProfileRepository) FindProfileByIDTx(ctx context.Context, tx interface{}, id uuid.UUID) (*domain.KYCProfile, error) {
 	var profile domain.KYCProfile
 	query := `SELECT * FROM customer_schema.kyc_profiles WHERE id = $1`
 
-	err := r.db.GetContext(ctx, &profile, query, id)
+	var err error
+	if tx == nil {
+		err = r.db.GetContext(ctx, &profile, query, id)
+	} else {
+		err = tx.(*SQLxTransaction).tx.GetContext(ctx, &profile, query, id)
+	}
+
 	if err == sql.ErrNoRows {
 		return nil, errors.ErrKYCProfileNotFound
 	}
@@ -153,12 +221,18 @@ func (r *KYCProfileRepository) FindByID(ctx context.Context, id uuid.UUID) (*dom
 	return &profile, nil
 }
 
-// FindByUserID finds a KYC profile by user ID
-func (r *KYCProfileRepository) FindByUserID(ctx context.Context, userID uuid.UUID) (*domain.KYCProfile, error) {
+// FindProfileByUserIDTx finds a KYC profile by user ID within a transaction
+func (r *KYCProfileRepository) FindProfileByUserIDTx(ctx context.Context, tx interface{}, userID uuid.UUID) (*domain.KYCProfile, error) {
 	var profile domain.KYCProfile
 	query := `SELECT * FROM customer_schema.kyc_profiles WHERE user_id = $1`
 
-	err := r.db.GetContext(ctx, &profile, query, userID)
+	var err error
+	if tx == nil {
+		err = r.db.GetContext(ctx, &profile, query, userID)
+	} else {
+		err = tx.(*SQLxTransaction).tx.GetContext(ctx, &profile, query, userID)
+	}
+
 	if err == sql.ErrNoRows {
 		return nil, errors.ErrKYCProfileNotFound
 	}
@@ -169,12 +243,18 @@ func (r *KYCProfileRepository) FindByUserID(ctx context.Context, userID uuid.UUI
 	return &profile, nil
 }
 
-// ExistsByUserID checks if a KYC profile exists for a user
-func (r *KYCProfileRepository) ExistsByUserID(ctx context.Context, userID uuid.UUID) (bool, error) {
+// ExistsByUserIDTx checks if a KYC profile exists for a user within a transaction
+func (r *KYCProfileRepository) ExistsByUserIDTx(ctx context.Context, tx interface{}, userID uuid.UUID) (bool, error) {
 	var exists bool
 	query := `SELECT EXISTS(SELECT 1 FROM customer_schema.kyc_profiles WHERE user_id = $1)`
 
-	err := r.db.GetContext(ctx, &exists, query, userID)
+	var err error
+	if tx == nil {
+		err = r.db.GetContext(ctx, &exists, query, userID)
+	} else {
+		err = tx.(*SQLxTransaction).tx.GetContext(ctx, &exists, query, userID)
+	}
+
 	if err != nil {
 		return false, errors.Wrap(err, "failed to check KYC profile existence")
 	}
@@ -182,8 +262,8 @@ func (r *KYCProfileRepository) ExistsByUserID(ctx context.Context, userID uuid.U
 	return exists, nil
 }
 
-// UpdateSubmissionStatus updates only the submission status and related timestamps
-func (r *KYCProfileRepository) UpdateSubmissionStatus(ctx context.Context, id uuid.UUID, status domain.KYCSubmissionStatus, notes string) error {
+// UpdateSubmissionStatusTx updates only the submission status within a transaction
+func (r *KYCProfileRepository) UpdateSubmissionStatusTx(ctx context.Context, tx interface{}, id uuid.UUID, status domain.KYCSubmissionStatus, notes string) error {
 	now := time.Now()
 	query := `
 		UPDATE customer_schema.kyc_profiles SET
@@ -205,7 +285,15 @@ func (r *KYCProfileRepository) UpdateSubmissionStatus(ctx context.Context, id uu
 		WHERE id = $4
 	`
 
-	result, err := r.db.ExecContext(ctx, query, status, notes, now, id)
+	var result sql.Result
+	var err error
+
+	if tx == nil {
+		result, err = r.db.ExecContext(ctx, query, status, notes, now, id)
+	} else {
+		result, err = tx.(*SQLxTransaction).tx.ExecContext(ctx, query, status, notes, now, id)
+	}
+
 	if err != nil {
 		return errors.Wrap(err, "failed to update KYC submission status")
 	}
@@ -222,8 +310,8 @@ func (r *KYCProfileRepository) UpdateSubmissionStatus(ctx context.Context, id uu
 	return nil
 }
 
-// UpdateAMLStatus updates AML-related fields
-func (r *KYCProfileRepository) UpdateAMLStatus(ctx context.Context, id uuid.UUID, status domain.AMLStatus, riskScore decimal.Decimal, pepCheck, sanctionCheck bool) error {
+// UpdateAMLStatusTx updates AML-related fields within a transaction
+func (r *KYCProfileRepository) UpdateAMLStatusTx(ctx context.Context, tx interface{}, id uuid.UUID, status domain.AMLStatus, riskScore decimal.Decimal, pepCheck, sanctionCheck bool) error {
 	query := `
 		UPDATE customer_schema.kyc_profiles SET
 			aml_check_status = $1,
@@ -234,7 +322,15 @@ func (r *KYCProfileRepository) UpdateAMLStatus(ctx context.Context, id uuid.UUID
 		WHERE id = $5
 	`
 
-	result, err := r.db.ExecContext(ctx, query, status, riskScore, pepCheck, sanctionCheck, id)
+	var result sql.Result
+	var err error
+
+	if tx == nil {
+		result, err = r.db.ExecContext(ctx, query, status, riskScore, pepCheck, sanctionCheck, id)
+	} else {
+		result, err = tx.(*SQLxTransaction).tx.ExecContext(ctx, query, status, riskScore, pepCheck, sanctionCheck, id)
+	}
+
 	if err != nil {
 		return errors.Wrap(err, "failed to update AML status")
 	}
@@ -251,8 +347,8 @@ func (r *KYCProfileRepository) UpdateAMLStatus(ctx context.Context, id uuid.UUID
 	return nil
 }
 
-// UpdateKYCLevel updates the KYC level
-func (r *KYCProfileRepository) UpdateKYCLevel(ctx context.Context, id uuid.UUID, level int) error {
+// UpdateKYCLevelTx updates the KYC level within a transaction
+func (r *KYCProfileRepository) UpdateKYCLevelTx(ctx context.Context, tx interface{}, id uuid.UUID, level int) error {
 	query := `
 		UPDATE customer_schema.kyc_profiles SET
 			kyc_level = $1,
@@ -260,7 +356,15 @@ func (r *KYCProfileRepository) UpdateKYCLevel(ctx context.Context, id uuid.UUID,
 		WHERE id = $2
 	`
 
-	result, err := r.db.ExecContext(ctx, query, level, id)
+	var result sql.Result
+	var err error
+
+	if tx == nil {
+		result, err = r.db.ExecContext(ctx, query, level, id)
+	} else {
+		result, err = tx.(*SQLxTransaction).tx.ExecContext(ctx, query, level, id)
+	}
+
 	if err != nil {
 		return errors.Wrap(err, "failed to update KYC level")
 	}
@@ -635,7 +739,8 @@ func NewKYCDocumentRepository(db *sqlx.DB) *KYCDocumentRepository {
 }
 
 // Create creates a new KYC document
-func (r *KYCDocumentRepository) Create(ctx context.Context, document *domain.KYCDocument) error {
+// CreateDocument creates a new KYC document within a transaction
+func (r *KYCDocumentRepository) CreateDocument(ctx context.Context, tx interface{}, document *domain.KYCDocument) error {
 	query := `
 		INSERT INTO customer_schema.kyc_documents (
 			id, user_id, document_type, document_number, issuing_country, issue_date,
@@ -674,9 +779,53 @@ func (r *KYCDocumentRepository) Create(ctx context.Context, document *domain.KYC
 		)
 	`
 
-	_, err := r.db.NamedExecContext(ctx, query, document)
+	var err error
+	if tx == nil {
+		_, err = r.db.NamedExecContext(ctx, query, document)
+	} else {
+		_, err = tx.(*SQLxTransaction).tx.NamedExecContext(ctx, query, document)
+	}
+
 	if err != nil {
 		return errors.Wrap(err, "failed to create KYC document")
+	}
+
+	return nil
+}
+
+// UpdateDocumentVerificationStatusTx updates document verification status within a transaction
+func (r *KYCDocumentRepository) UpdateDocumentVerificationStatusTx(ctx context.Context, tx interface{}, id uuid.UUID, status domain.DocumentVerificationStatus, notes string, verifiedBy uuid.UUID) error {
+	now := time.Now()
+	query := `
+		UPDATE customer_schema.kyc_documents SET
+			verification_status = $1,
+			verification_notes = COALESCE($2, verification_notes),
+			verified_by = $3,
+			verified_at = $4,
+			updated_at = $4
+		WHERE id = $5
+	`
+
+	var result sql.Result
+	var err error
+
+	if tx == nil {
+		result, err = r.db.ExecContext(ctx, query, status, notes, verifiedBy, now, id)
+	} else {
+		result, err = tx.(*SQLxTransaction).tx.ExecContext(ctx, query, status, notes, verifiedBy, now, id)
+	}
+
+	if err != nil {
+		return errors.Wrap(err, "failed to update document verification status")
+	}
+
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return errors.Wrap(err, "failed to get rows affected")
+	}
+
+	if rows == 0 {
+		return errors.ErrDocumentNotFound
 	}
 
 	return nil
@@ -764,6 +913,45 @@ func (r *KYCDocumentRepository) Update(ctx context.Context, document *domain.KYC
 	result, err := r.db.NamedExecContext(ctx, query, document)
 	if err != nil {
 		return errors.Wrap(err, "failed to update KYC document")
+	}
+
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return errors.Wrap(err, "failed to get rows affected")
+	}
+
+	if rows == 0 {
+		return errors.ErrDocumentNotFound
+	}
+
+	return nil
+}
+
+// UpdateDocumentVirusScanStatusTx updates virus scan status within a transaction
+func (r *KYCDocumentRepository) UpdateDocumentVirusScanStatusTx(ctx context.Context, tx interface{}, id uuid.UUID, status domain.VirusScanStatus, resultStr, engine, version string) error {
+	now := time.Now()
+	query := `
+		UPDATE customer_schema.kyc_documents SET
+			virus_scan_status = $1,
+			virus_scan_result = COALESCE($2, virus_scan_result),
+			virus_scan_engine = COALESCE($3, virus_scan_engine),
+			virus_scan_version = COALESCE($4, virus_scan_version),
+			scanned_at = $5,
+			updated_at = $5
+		WHERE id = $6
+	`
+
+	var result sql.Result
+	var err error
+
+	if tx == nil {
+		result, err = r.db.ExecContext(ctx, query, status, resultStr, engine, version, now, id)
+	} else {
+		result, err = tx.(*SQLxTransaction).tx.ExecContext(ctx, query, status, resultStr, engine, version, now, id)
+	}
+
+	if err != nil {
+		return errors.Wrap(err, "failed to update virus scan status")
 	}
 
 	rows, err := result.RowsAffected()
@@ -1037,4 +1225,288 @@ func (r *KYCDocumentRepository) FindDocumentsDueForDeletion(ctx context.Context,
 	}
 
 	return documents, nil
+}
+
+// KYCRepositoryComposite implements the complete Repository interface
+type KYCRepositoryComposite struct {
+	profileRepo      *KYCProfileRepository
+	documentRepo     *KYCDocumentRepository
+	requirementsRepo *KYCRequirementsRepository
+	userRepo         *UserRepository
+}
+
+// NewKYCRepositoryComposite creates a composite repository
+func NewKYCRepositoryComposite(db *sqlx.DB) *KYCRepositoryComposite {
+	return &KYCRepositoryComposite{
+		profileRepo:      NewKYCProfileRepository(db),
+		documentRepo:     NewKYCDocumentRepository(db),
+		requirementsRepo: NewKYCRequirementsRepository(db),
+		userRepo:         NewUserRepository(db),
+	}
+}
+
+// Implement all Repository interface methods by delegating to appropriate repos
+
+// Profile operations
+func (r *KYCRepositoryComposite) CreateProfile(ctx context.Context, profile *domain.KYCProfile) error {
+	return r.profileRepo.Create(ctx, profile)
+}
+
+func (r *KYCRepositoryComposite) UpdateProfile(ctx context.Context, profile *domain.KYCProfile) error {
+	return r.profileRepo.Update(ctx, profile)
+}
+
+func (r *KYCRepositoryComposite) BeginTransaction(ctx context.Context) (*SQLxTransaction, error) {
+	return r.profileRepo.BeginTransaction(ctx)
+}
+
+func (r *KYCRepositoryComposite) CreateProfileTx(ctx context.Context, tx interface{}, profile *domain.KYCProfile) error {
+	return r.profileRepo.CreateProfileTx(ctx, tx, profile)
+}
+
+func (r *KYCRepositoryComposite) UpdateProfileTx(ctx context.Context, tx interface{}, profile *domain.KYCProfile) error {
+	return r.profileRepo.UpdateProfileTx(ctx, tx, profile)
+}
+
+func (r *KYCRepositoryComposite) UpdateSubmissionStatusTx(ctx context.Context, tx interface{}, id uuid.UUID, status domain.KYCSubmissionStatus, notes string) error {
+	return r.profileRepo.UpdateSubmissionStatusTx(ctx, tx, id, status, notes)
+}
+
+func (r *KYCRepositoryComposite) UpdateAMLStatusTx(ctx context.Context, tx interface{}, id uuid.UUID, status domain.AMLStatus, riskScore decimal.Decimal, pepCheck, sanctionCheck bool) error {
+	return r.profileRepo.UpdateAMLStatusTx(ctx, tx, id, status, riskScore, pepCheck, sanctionCheck)
+}
+
+func (r *KYCRepositoryComposite) UpdateKYCLevelTx(ctx context.Context, tx interface{}, id uuid.UUID, level int) error {
+	return r.profileRepo.UpdateKYCLevelTx(ctx, tx, id, level)
+}
+
+func (r *KYCRepositoryComposite) FindProfileByIDTx(ctx context.Context, tx interface{}, id uuid.UUID) (*domain.KYCProfile, error) {
+	return r.profileRepo.FindProfileByIDTx(ctx, tx, id)
+}
+
+func (r *KYCRepositoryComposite) FindProfileByUserIDTx(ctx context.Context, tx interface{}, userID uuid.UUID) (*domain.KYCProfile, error) {
+	return r.profileRepo.FindProfileByUserIDTx(ctx, tx, userID)
+}
+
+func (r *KYCRepositoryComposite) ExistsByUserIDTx(ctx context.Context, tx interface{}, userID uuid.UUID) (bool, error) {
+	return r.profileRepo.ExistsByUserIDTx(ctx, tx, userID)
+}
+
+func (r *KYCRepositoryComposite) FindProfileByID(ctx context.Context, id uuid.UUID) (*domain.KYCProfile, error) {
+	return r.profileRepo.FindProfileByIDTx(ctx, nil, id)
+}
+
+func (r *KYCRepositoryComposite) FindProfileByUserID(ctx context.Context, userID uuid.UUID) (*domain.KYCProfile, error) {
+	return r.profileRepo.FindProfileByUserIDTx(ctx, nil, userID)
+}
+
+func (r *KYCRepositoryComposite) ExistsByUserID(ctx context.Context, userID uuid.UUID) (bool, error) {
+	return r.profileRepo.ExistsByUserIDTx(ctx, nil, userID)
+}
+
+func (r *KYCRepositoryComposite) UpdateSubmissionStatus(ctx context.Context, id uuid.UUID, status domain.KYCSubmissionStatus, notes string) error {
+	return r.profileRepo.UpdateSubmissionStatusTx(ctx, nil, id, status, notes)
+}
+
+func (r *KYCRepositoryComposite) UpdateAMLStatus(ctx context.Context, id uuid.UUID, status domain.AMLStatus, riskScore decimal.Decimal, pepCheck, sanctionCheck bool) error {
+	return r.profileRepo.UpdateAMLStatusTx(ctx, nil, id, status, riskScore, pepCheck, sanctionCheck)
+}
+
+func (r *KYCRepositoryComposite) UpdateKYCLevel(ctx context.Context, id uuid.UUID, level int) error {
+	return r.profileRepo.UpdateKYCLevelTx(ctx, nil, id, level)
+}
+
+func (r *KYCRepositoryComposite) FindPendingReview(ctx context.Context, limit, offset int) ([]*domain.KYCProfile, error) {
+	// Implementation using non-transactional query
+	var profiles []*domain.KYCProfile
+	query := `
+		SELECT * FROM customer_schema.kyc_profiles 
+		WHERE submission_status IN ('submitted', 'under_review', 'additional_info_required')
+		ORDER BY submitted_at ASC, created_at ASC
+		LIMIT $1 OFFSET $2
+	`
+
+	err := r.profileRepo.db.SelectContext(ctx, &profiles, query, limit, offset)
+	if err != nil {
+		return nil, errors.Wrap(err, "failed to find pending review profiles")
+	}
+
+	return profiles, nil
+}
+
+func (r *KYCRepositoryComposite) CountPendingReview(ctx context.Context) (int, error) {
+	var count int
+	query := `
+		SELECT COUNT(*) FROM customer_schema.kyc_profiles 
+		WHERE submission_status IN ('submitted', 'under_review', 'additional_info_required')
+	`
+
+	err := r.profileRepo.db.GetContext(ctx, &count, query)
+	if err != nil {
+		return 0, errors.Wrap(err, "failed to count pending review profiles")
+	}
+
+	return count, nil
+}
+
+func (r *KYCRepositoryComposite) FindByStatus(ctx context.Context, status domain.KYCSubmissionStatus, limit, offset int) ([]*domain.KYCProfile, error) {
+	var profiles []*domain.KYCProfile
+	query := `
+		SELECT * FROM customer_schema.kyc_profiles 
+		WHERE submission_status = $1
+		ORDER BY updated_at DESC
+		LIMIT $2 OFFSET $3
+	`
+
+	err := r.profileRepo.db.SelectContext(ctx, &profiles, query, status, limit, offset)
+	if err != nil {
+		return nil, errors.Wrap(err, fmt.Sprintf("failed to find profiles by status: %s", status))
+	}
+
+	return profiles, nil
+}
+
+// Requirements operations
+func (r *KYCRepositoryComposite) FindRequirementsByCountryAndUserType(ctx context.Context, countryCode, userType string, kycLevel int) (*domain.KYCRequirements, error) {
+	return r.requirementsRepo.FindByCountryAndUserType(ctx, countryCode, userType, kycLevel)
+}
+
+func (r *KYCRepositoryComposite) FindAllActiveRequirements(ctx context.Context, limit, offset int) ([]*domain.KYCRequirements, error) {
+	return r.requirementsRepo.FindAllActive(ctx, limit, offset)
+}
+
+// Document operations
+func (r *KYCRepositoryComposite) CreateDocument(ctx context.Context, document *domain.KYCDocument) error {
+	return r.documentRepo.CreateDocument(ctx, nil, document)
+}
+
+func (r *KYCRepositoryComposite) UpdateDocument(ctx context.Context, document *domain.KYCDocument) error {
+	query := `
+		UPDATE customer_schema.kyc_documents SET
+			document_type = :document_type,
+			document_number = :document_number,
+			issuing_country = :issuing_country,
+			issue_date = :issue_date,
+			expiry_date = :expiry_date,
+			front_image_url = :front_image_url,
+			back_image_url = :back_image_url,
+			selfie_image_url = :selfie_image_url,
+			file_name = :file_name,
+			file_size_bytes = :file_size_bytes,
+			mime_type = :mime_type,
+			file_extension = :file_extension,
+			storage_provider = :storage_provider,
+			storage_bucket = :storage_bucket,
+			storage_key = :storage_key,
+			storage_region = :storage_region,
+			public_url = :public_url,
+			internal_path = :internal_path,
+			file_hash_sha256 = :file_hash_sha256,
+			file_hash_md5 = :file_hash_md5,
+			checksum_algorithm = :checksum_algorithm,
+			file_integrity_verified = :file_integrity_verified,
+			integrity_verified_at = :integrity_verified_at,
+			integrity_verified_by = :integrity_verified_by,
+			virus_scan_status = :virus_scan_status,
+			virus_scan_result = :virus_scan_result,
+			virus_scan_engine = :virus_scan_engine,
+			virus_scan_version = :virus_scan_version,
+			virus_signatures = :virus_signatures,
+			scanned_at = :scanned_at,
+			scanned_by = :scanned_by,
+			ocr_status = :ocr_status,
+			ocr_text = :ocr_text,
+			ocr_confidence = :ocr_confidence,
+			ocr_processed_at = :ocr_processed_at,
+			extracted_fields = :extracted_fields,
+			validation_status = :validation_status,
+			validation_errors = :validation_errors,
+			validation_warnings = :validation_warnings,
+			is_blurred = :is_blurred,
+			is_expired = :is_expired,
+			is_tampered = :is_tampered,
+			quality_score = :quality_score,
+			validation_notes = :validation_notes,
+			validated_at = :validated_at,
+			validated_by = :validated_by,
+			verification_status = :verification_status,
+			verification_notes = :verification_notes,
+			verified_by = :verified_by,
+			verified_at = :verified_at,
+			retention_policy = :retention_policy,
+			retention_days = :retention_days,
+			scheduled_deletion_date = :scheduled_deletion_date,
+			is_archived = :is_archived,
+			archived_at = :archived_at,
+			archive_reason = :archive_reason,
+			access_level = :access_level,
+			download_count = :download_count,
+			last_downloaded_at = :last_downloaded_at,
+			last_downloaded_by = :last_downloaded_by,
+			view_count = :view_count,
+			last_viewed_at = :last_viewed_at,
+			last_viewed_by = :last_viewed_by,
+			process_id = :process_id,
+			workflow_step = :workflow_step,
+			review_cycle = :review_cycle,
+			is_manual_review_required = :is_manual_review_required,
+			manual_review_notes = :manual_review_notes,
+			manual_reviewed_at = :manual_reviewed_at,
+			manual_reviewed_by = :manual_reviewed_by,
+			metadata = :metadata,
+			updated_at = :updated_at
+		WHERE id = :id
+	`
+
+	result, err := r.documentRepo.db.NamedExecContext(ctx, query, document)
+	if err != nil {
+		return errors.Wrap(err, "failed to update KYC document")
+	}
+
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return errors.Wrap(err, "failed to get rows affected")
+	}
+
+	if rows == 0 {
+		return errors.ErrDocumentNotFound
+	}
+
+	return nil
+}
+
+func (r *KYCRepositoryComposite) FindDocumentByID(ctx context.Context, id uuid.UUID) (*domain.KYCDocument, error) {
+	return r.documentRepo.FindByID(ctx, id)
+}
+
+func (r *KYCRepositoryComposite) FindDocumentsByUserID(ctx context.Context, userID uuid.UUID) ([]*domain.KYCDocument, error) {
+	return r.documentRepo.FindByUserID(ctx, userID)
+}
+
+func (r *KYCRepositoryComposite) FindDocumentsByUserIDAndType(ctx context.Context, userID uuid.UUID, docType domain.DocumentType) ([]*domain.KYCDocument, error) {
+	return r.documentRepo.FindByUserIDAndType(ctx, userID, docType)
+}
+
+func (r *KYCRepositoryComposite) UpdateDocumentVerificationStatus(ctx context.Context, id uuid.UUID, status domain.DocumentVerificationStatus, notes string, verifiedBy uuid.UUID) error {
+	return r.documentRepo.UpdateDocumentVerificationStatusTx(ctx, nil, id, status, notes, verifiedBy)
+}
+
+func (r *KYCRepositoryComposite) UpdateDocumentVirusScanStatus(ctx context.Context, id uuid.UUID, status domain.VirusScanStatus, resultStr, engine, version string) error {
+	return r.documentRepo.UpdateDocumentVirusScanStatusTx(ctx, nil, id, status, resultStr, engine, version)
+}
+
+func (r *KYCRepositoryComposite) FindPendingVirusScan(ctx context.Context, limit int) ([]*domain.KYCDocument, error) {
+	return r.documentRepo.FindPendingVirusScan(ctx, limit)
+}
+
+func (r *KYCRepositoryComposite) FindPendingVerification(ctx context.Context, limit, offset int) ([]*domain.KYCDocument, error) {
+	return r.documentRepo.FindPendingVerification(ctx, limit, offset)
+}
+
+func (r *KYCRepositoryComposite) CountDocumentsByUserIDAndStatus(ctx context.Context, userID uuid.UUID, status domain.DocumentVerificationStatus) (int, error) {
+	return r.documentRepo.CountByUserIDAndStatus(ctx, userID, status)
+}
+
+func (r *KYCRepositoryComposite) DeleteDocument(ctx context.Context, id uuid.UUID) error {
+	return r.documentRepo.Delete(ctx, id)
 }

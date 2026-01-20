@@ -8,6 +8,8 @@ import (
 	"strconv"
 	"strings"
 	"time"
+
+	"github.com/shopspring/decimal"
 )
 
 type Config struct {
@@ -19,6 +21,10 @@ type Config struct {
 	Ripple       RippleConfig
 	Email        EmailConfig
 	Verification VerificationConfig
+	FileUpload   FileUploadConfig
+	AML          AMLConfig
+	VirusScan    VirusScanConfig
+	KYC          KYCConfig
 }
 
 type ServerConfig struct {
@@ -29,11 +35,48 @@ type ServerConfig struct {
 	IdleTimeout  time.Duration
 }
 
+type KYCConfig struct {
+	MaxFileSize        int64
+	AllowedFileTypes   []string
+	DocumentRetention  time.Duration
+	AutoApproveEnabled bool
+	AutoApproveLimit   decimal.Decimal
+}
+
 type DatabaseConfig struct {
 	URL             string
 	MaxOpenConns    int
 	MaxIdleConns    int
 	ConnMaxLifetime time.Duration
+}
+
+// ========== File Upload Configuration ==========
+type FileUploadConfig struct {
+	StorageType     string // "local", "s3", "minio"
+	LocalUploadDir  string
+	MaxUploadSize   int64
+	PresignedURLExp time.Duration
+	CDNBaseURL      string
+}
+
+// ========== AML Configuration ==========
+type AMLConfig struct {
+	Enabled        bool
+	Provider       string // "mock", "sanction-screening", "local"
+	CheckThreshold decimal.Decimal
+	AutoBlock      bool
+	APIKey         string
+	Endpoint       string
+}
+
+// ========== Virus Scan Configuration ==========
+type VirusScanConfig struct {
+	Enabled       bool
+	Engine        string // "mock", "clamav", "cloud-scan"
+	ClamAVHost    string
+	ClamAVPort    int
+	ScanTimeout   time.Duration
+	QuarantineDir string
 }
 
 type RedisConfig struct {
@@ -119,6 +162,37 @@ func Load() *Config {
 			IssuerAddress: getEnv("RIPPLE_ISSUER_ADDRESS", ""),
 			SecretKey:     getEnv("RIPPLE_SECRET_KEY", ""),
 		},
+
+		KYC: KYCConfig{
+			MaxFileSize:        getInt64Env("KYC_MAX_FILE_SIZE", 10*1024*1024), // 10MB
+			AllowedFileTypes:   strings.Split(getEnv("KYC_ALLOWED_FILE_TYPES", "image/jpeg,image/png,application/pdf"), ","),
+			DocumentRetention:  getDurationEnv("KYC_DOCUMENT_RETENTION", 365*24*time.Hour),
+			AutoApproveEnabled: getBoolEnv("KYC_AUTO_APPROVE_ENABLED", false),
+			AutoApproveLimit:   getDecimalEnv("KYC_AUTO_APPROVE_LIMIT", "1000"),
+		},
+		FileUpload: FileUploadConfig{
+			StorageType:     getEnv("FILE_STORAGE_TYPE", "local"),
+			LocalUploadDir:  getEnv("LOCAL_UPLOAD_DIR", "./uploads"),
+			MaxUploadSize:   getInt64Env("MAX_UPLOAD_SIZE", 25*1024*1024), // 25MB
+			PresignedURLExp: getDurationEnv("PRESIGNED_URL_EXPIRY", 15*time.Minute),
+			CDNBaseURL:      getEnv("CDN_BASE_URL", "http://localhost:8080/uploads"),
+		},
+		AML: AMLConfig{
+			Enabled:        getBoolEnv("AML_ENABLED", false),
+			Provider:       getEnv("AML_PROVIDER", "mock"),
+			CheckThreshold: getDecimalEnv("AML_CHECK_THRESHOLD", "5000"),
+			AutoBlock:      getBoolEnv("AML_AUTO_BLOCK", false),
+			APIKey:         getEnv("AML_API_KEY", ""),
+			Endpoint:       getEnv("AML_ENDPOINT", ""),
+		},
+		VirusScan: VirusScanConfig{
+			Enabled:       getBoolEnv("VIRUS_SCAN_ENABLED", true),
+			Engine:        getEnv("VIRUS_SCAN_ENGINE", "mock"),
+			ClamAVHost:    getEnv("CLAMAV_HOST", "localhost"),
+			ClamAVPort:    getIntEnv("CLAMAV_PORT", 3310),
+			ScanTimeout:   getDurationEnv("VIRUS_SCAN_TIMEOUT", 30*time.Second),
+			QuarantineDir: getEnv("VIRUS_QUARANTINE_DIR", "./quarantine"),
+		},
 	}
 }
 
@@ -168,4 +242,22 @@ func getBoolEnv(key string, defaultValue bool) bool {
 		}
 	}
 	return defaultValue
+}
+
+func getInt64Env(key string, defaultValue int64) int64 {
+	if value := os.Getenv(key); value != "" {
+		if intVal, err := strconv.ParseInt(value, 10, 64); err == nil {
+			return intVal
+		}
+	}
+	return defaultValue
+}
+
+func getDecimalEnv(key string, defaultValue string) decimal.Decimal {
+	if value := os.Getenv(key); value != "" {
+		if dec, err := decimal.NewFromString(value); err == nil {
+			return dec
+		}
+	}
+	return decimal.RequireFromString(defaultValue)
 }

@@ -1,4 +1,5 @@
 // Package domain defines the core business entities for the KYD system.
+// pkg/domain/kyc.go
 package domain
 
 import (
