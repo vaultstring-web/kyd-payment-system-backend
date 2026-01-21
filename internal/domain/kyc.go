@@ -1,4 +1,5 @@
 // Package domain re-exports KYC domain types from pkg/domain.
+// internal/domain/kyc.go
 package domain
 
 import pkg "kyd/pkg/domain"

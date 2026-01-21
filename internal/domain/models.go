@@ -1,5 +1,5 @@
 // Package domain re-exports core domain types so internal code can import
-// `kyd/internal/domain` while using definitions from `kyd/pkg/domain`.
+// `kyd/internal/domain/models.go` while using definitions from `kyd/pkg/domain`.
 package domain
 
 import pkg "kyd/pkg/domain"

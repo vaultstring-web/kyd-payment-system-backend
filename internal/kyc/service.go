@@ -2979,3 +2979,185 @@ func (s *KYCService) SubmitKYCData(
 
 	return response, nil
 }
+
+// Add these methods to the KYCService struct:
+
+// GetUser retrieves a user by ID
+func (s *KYCService) GetUser(ctx context.Context, userID uuid.UUID) (*domain.User, error) {
+	user, err := s.userRepo.FindByID(ctx, userID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get user: %w", err)
+	}
+	return user, nil
+}
+
+// UserHasKYCProfile checks if a user has a KYC profile
+func (s *KYCService) UserHasKYCProfile(ctx context.Context, userID uuid.UUID) (bool, error) {
+	exists, err := s.repo.ExistsByUserID(ctx, userID)
+	if err != nil {
+		return false, fmt.Errorf("failed to check KYC profile existence: %w", err)
+	}
+	return exists, nil
+}
+
+// GetUserKYCProfile retrieves a user's KYC profile
+func (s *KYCService) GetUserKYCProfile(ctx context.Context, userID uuid.UUID) (*domain.KYCProfile, error) {
+	profile, err := s.repo.FindProfileByUserID(ctx, userID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get KYC profile: %w", err)
+	}
+	return profile, nil
+}
+
+// GetKYCRequirements retrieves KYC requirements for a specific country, user type, and KYC level
+func (s *KYCService) GetKYCRequirements(ctx context.Context, countryCode, userType string, kycLevel int) (*domain.KYCRequirements, error) {
+	requirements, err := s.repo.FindRequirementsByCountryAndUserType(ctx, countryCode, userType, kycLevel)
+	if err != nil {
+		return nil, fmt.Errorf("failed to get KYC requirements: %w", err)
+	}
+	return requirements, nil
+}
+
+// UploadDocument handles document upload with file storage
+func (s *KYCService) UploadDocument(
+	ctx context.Context,
+	userID uuid.UUID,
+	req *domain.UploadDocumentRequest,
+	fileData []byte,
+) (*domain.UploadDocumentResponse, error) {
+	startTime := time.Now()
+
+	// Validate user has KYC profile
+	hasProfile, err := s.UserHasKYCProfile(ctx, userID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to check KYC profile: %w", err)
+	}
+
+	if !hasProfile {
+		return nil, errors.New("KYC profile required before document upload")
+	}
+
+	// Prepare upload request
+	uploadReq := &fileupload.UploadRequest{
+		UserID:       userID,
+		DocumentType: req.DocumentType,
+		FileName:     req.FileName,
+		FileData:     fileData,
+		ContentType:  req.MimeType,
+		Metadata: map[string]interface{}{
+			"document_number": req.DocumentNumber,
+			"issuing_country": req.IssuingCountry,
+			"issue_date":      req.IssueDate,
+			"expiry_date":     req.ExpiryDate,
+			"upload_source":   "kyc_handler",
+		},
+		AccessLevel:     domain.AccessLevelConfidential,
+		RetentionPolicy: domain.RetentionPolicyKYCCompliance,
+	}
+
+	// Upload file
+	uploadResp, err := s.fileUploadService.UploadFile(ctx, uploadReq)
+	if err != nil {
+		return nil, fmt.Errorf("failed to upload file: %w", err)
+	}
+
+	// Create document record in database
+	document := &domain.KYCDocument{
+		ID:                 uploadResp.FileID,
+		UserID:             userID,
+		DocumentType:       req.DocumentType,
+		DocumentNumber:     req.DocumentNumber,
+		IssuingCountry:     req.IssuingCountry,
+		IssueDate:          req.IssueDate,
+		ExpiryDate:         req.ExpiryDate,
+		FileName:           req.FileName,
+		FileSizeBytes:      &uploadResp.FileSize,
+		MimeType:           req.MimeType,
+		StorageProvider:    domain.StorageProviderLocal,
+		StorageKey:         uploadResp.StoragePath,
+		PublicURL:          uploadResp.PublicURL,
+		FileHashSHA256:     uploadResp.ChecksumSHA256,
+		FileHashMD5:        uploadResp.ChecksumMD5,
+		VirusScanStatus:    domain.VirusScanStatusPending,
+		ValidationStatus:   domain.ValidationStatusPending,
+		VerificationStatus: domain.DocumentStatusPending,
+		RetentionPolicy:    domain.RetentionPolicyKYCCompliance,
+		AccessLevel:        domain.AccessLevelConfidential,
+		CreatedAt:          time.Now(),
+		UpdatedAt:          time.Now(),
+	}
+
+	// Save document to repository
+	if err := s.repo.CreateDocument(ctx, document); err != nil {
+		// Clean up uploaded file if database save fails
+		s.fileUploadService.DeleteFile(ctx, uploadResp.FileID)
+		return nil, fmt.Errorf("failed to save document record: %w", err)
+	}
+
+	// Queue for processing
+	go s.queueDocumentForProcessing(uploadResp.FileID, userID, uploadResp.StoragePath)
+
+	// Build response
+	response := &domain.UploadDocumentResponse{
+		DocumentID:         uploadResp.FileID,
+		UserID:             userID,
+		DocumentType:       req.DocumentType,
+		VerificationStatus: domain.DocumentStatusPending,
+		VirusScanStatus:    domain.VirusScanStatusPending,
+		ValidationStatus:   domain.ValidationStatusPending,
+		PublicURL:          uploadResp.PublicURL,
+		Message: fmt.Sprintf(
+			"Document uploaded successfully. File ID: %s",
+			uploadResp.FileID.String()[:8],
+		),
+		NextSteps: []string{
+			"Document queued for virus scanning",
+			"Validation will begin shortly",
+			"You will be notified when verification is complete",
+		},
+	}
+
+	// Log successful upload
+	s.logger.Info("KYC document uploaded and saved", map[string]interface{}{
+		"event":         "kyc_document_uploaded",
+		"user_id":       userID.String(),
+		"document_id":   uploadResp.FileID.String(),
+		"document_type": req.DocumentType,
+		"file_name":     req.FileName,
+		"file_size":     uploadResp.FileSize,
+		"storage_path":  uploadResp.StoragePath,
+		"duration_ms":   time.Since(startTime).Milliseconds(),
+	})
+
+	return response, nil
+}
+
+// queueDocumentForProcessing queues a document for background processing
+func (s *KYCService) queueDocumentForProcessing(documentID, userID uuid.UUID, filePath string) {
+	_ = context.Background()
+
+	// Create processing job
+	job := &documentProcessingJob{
+		documentID: documentID,
+		filePath:   filePath,
+		userID:     userID,
+	}
+
+	// Send to processing queue
+	select {
+	case s.documentQueue <- job:
+		s.logger.Info("Document queued for processing", map[string]interface{}{
+			"event":       "document_queued_for_processing",
+			"document_id": documentID.String(),
+			"user_id":     userID.String(),
+			"queue_size":  len(s.documentQueue),
+		})
+	default:
+		s.logger.Warn("Document queue is full", map[string]interface{}{
+			"event":       "document_queue_full",
+			"document_id": documentID.String(),
+			"user_id":     userID.String(),
+		})
+		// In production, you might want to retry or use a persistent queue
+	}
+}

@@ -1,4 +1,5 @@
 // Package handler provides HTTP handlers for the KYD services.
+// internal/handler/auth.go
 package handler
 
 import (
