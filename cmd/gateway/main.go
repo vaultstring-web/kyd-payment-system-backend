@@ -166,6 +166,8 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	switch {
 	case matchPath(r.URL.Path, "/api/v1/auth"):
 		g.authProxy.ServeHTTP(w, r)
+	case matchPath(r.URL.Path, "/api/v1/kyc"): // Add KYC routes
+		g.authProxy.ServeHTTP(w, r) // Route to auth service (which now includes KYC)
 	case matchPath(r.URL.Path, "/api/v1/admin"):
 		// Admin endpoints are handled by payment service
 		g.paymentProxy.ServeHTTP(w, r)

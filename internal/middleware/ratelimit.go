@@ -1,4 +1,5 @@
 // Package middleware provides shared HTTP middleware utilities.
+// internal/middleware/ratelimit.go
 package middleware
 
 import (

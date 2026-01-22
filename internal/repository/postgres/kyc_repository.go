@@ -1,5 +1,6 @@
 // ==============================================================================
 // KYC REPOSITORY IMPLEMENTATION
+// internal/repository/postgres/kyc_repository.go
 // ==============================================================================
 // Implements KYC repository interfaces for PostgreSQL
 // Follows existing patterns from auth, wallet, transaction repositories

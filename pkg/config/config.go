@@ -1,5 +1,5 @@
 // ==============================================================================
-// CONFIG PACKAGE EXTENSIONS - pkg/config/config.go (FULL VERSION)
+// CONFIG PACKAGE EXTENSIONS - pkg/config/config.go
 // ==============================================================================
 package config
 

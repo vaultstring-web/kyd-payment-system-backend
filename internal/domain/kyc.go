@@ -12,17 +12,26 @@ const (
 	KYCProfileTypeBusiness   = pkg.KYCProfileTypeBusiness
 )
 
+const (
+	KYCStatusDraft                  KYCStatus = "draft"
+	KYCStatusUnderReview            KYCStatus = "under_review"
+	KYCStatusAdditionalInfoRequired KYCStatus = "additional_info_required"
+	KYCStatusApproved               KYCStatus = "approved"
+	KYCStatusSuspended              KYCStatus = "suspended"
+)
+
 // KYCSubmissionStatus represents KYC submission workflow status.
 type KYCSubmissionStatus = pkg.KYCSubmissionStatus
 
 const (
-	KYCSubmissionStatusDraft                  = pkg.KYCSubmissionStatusDraft
-	KYCSubmissionStatusSubmitted              = pkg.KYCSubmissionStatusSubmitted
-	KYCSubmissionStatusUnderReview            = pkg.KYCSubmissionStatusUnderReview
-	KYCSubmissionStatusAdditionalInfoRequired = pkg.KYCSubmissionStatusAdditionalInfoRequired
-	KYCSubmissionStatusApproved               = pkg.KYCSubmissionStatusApproved
-	KYCSubmissionStatusRejected               = pkg.KYCSubmissionStatusRejected
-	KYCSubmissionStatusSuspended              = pkg.KYCSubmissionStatusSuspended
+	KYCSubmissionStatusDraft                  KYCSubmissionStatus = "draft"
+	KYCSubmissionStatusPending                KYCSubmissionStatus = "pending"
+	KYCSubmissionStatusSubmitted              KYCSubmissionStatus = "submitted"
+	KYCSubmissionStatusUnderReview            KYCSubmissionStatus = "under_review"
+	KYCSubmissionStatusAdditionalInfoRequired KYCSubmissionStatus = "additional_info_required"
+	KYCSubmissionStatusApproved               KYCSubmissionStatus = "approved"
+	KYCSubmissionStatusRejected               KYCSubmissionStatus = "rejected"
+	KYCSubmissionStatusSuspended              KYCSubmissionStatus = "suspended"
 )
 
 // AMLStatus represents AML check status.

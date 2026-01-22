@@ -1,4 +1,5 @@
 // Package middleware provides shared HTTP middleware utilities.
+// internal/middleware/idempotency.go
 package middleware
 
 import (

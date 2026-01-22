@@ -1,4 +1,5 @@
 // Package middleware hosts authentication, logging, and rate limiting middleware.
+// internal/middleware/auth.go
 package middleware
 
 import (
