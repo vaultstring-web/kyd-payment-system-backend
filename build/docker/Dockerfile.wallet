@@ -1,11 +1,10 @@
-FROM golang:1.24.4-alpine AS builder
+FROM golang:1.24.11-alpine AS builder
 
 WORKDIR /app
 
 RUN apk add --no-cache git ca-certificates tzdata
 
 COPY go.mod go.sum ./
-COPY third_party ./third_party
 RUN go mod download
 
 ENV GOPROXY=https://proxy.golang.org,direct

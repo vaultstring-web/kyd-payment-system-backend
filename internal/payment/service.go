@@ -13,14 +13,27 @@ import (
 	"fmt"
 	"time"
 
-	"kyd/internal/domain"
-	"kyd/internal/ledger"
-	pkgerrors "kyd/pkg/errors"
-	"kyd/pkg/logger"
-
 	"github.com/google/uuid"
 	"github.com/shopspring/decimal"
+
+	"kyd/internal/domain"
+	"kyd/internal/ledger"
+	"kyd/internal/monitoring"
+	"kyd/internal/notification"
+	"kyd/internal/risk"
+	"kyd/pkg/config"
+	pkgerrors "kyd/pkg/errors"
+	"kyd/pkg/logger"
+	"kyd/pkg/validator"
 )
+
+type TransactionDetail struct {
+	*domain.Transaction
+	SenderName           string `json:"sender_name,omitempty"`
+	ReceiverName         string `json:"receiver_name,omitempty"`
+	SenderWalletNumber   string `json:"sender_wallet_number,omitempty"`
+	ReceiverWalletNumber string `json:"receiver_wallet_number,omitempty"`
+}
 
 type Service struct {
 	repo          Repository
@@ -29,6 +42,10 @@ type Service struct {
 	ledgerService LedgerService
 	userRepo      UserRepository
 	logger        logger.Logger
+	riskEngine    *risk.RiskEngine
+	monitor       *monitoring.BehavioralMonitor
+	notifier      notification.Service
+	auditRepo     AuditRepository
 }
 
 func NewService(
@@ -37,8 +54,25 @@ func NewService(
 	forexService ForexService,
 	ledgerService LedgerService,
 	userRepo UserRepository,
+	notifier notification.Service,
+	auditRepo AuditRepository,
 	log logger.Logger,
+	cfg *config.Config,
 ) *Service {
+	// Use default if nil (for tests/backward compatibility)
+	var riskCfg config.RiskConfig
+	if cfg != nil {
+		riskCfg = cfg.Risk
+	} else {
+		riskCfg = config.RiskConfig{
+			EnableCircuitBreaker:   true,
+			MaxDailyLimit:          100000,
+			MaxVelocityPerHour:     10,
+			HighValueThreshold:     50000,
+			AdminApprovalThreshold: 1000000, // Default to 1M if not set, to avoid blocking tests
+		}
+	}
+
 	return &Service{
 		repo:          repo,
 		walletRepo:    walletRepo,
@@ -46,18 +80,28 @@ func NewService(
 		ledgerService: ledgerService,
 		userRepo:      userRepo,
 		logger:        log,
+		riskEngine:    risk.NewRiskEngine(riskCfg),
+		monitor:       monitoring.NewBehavioralMonitor(),
+		notifier:      notifier,
+		auditRepo:     auditRepo,
 	}
 }
 
 type InitiatePaymentRequest struct {
-	SenderID         uuid.UUID       `json:"sender_id" validate:"required"`
-	ReceiverID       uuid.UUID       `json:"receiver_id" validate:"-"`
-	ReceiverWalletID uuid.UUID       `json:"receiver_wallet_id" validate:"-"`
-	Amount           decimal.Decimal `json:"amount" validate:"required"`
-	Currency         domain.Currency `json:"currency" validate:"required"`
-	Description      string          `json:"description"`
-	Channel          string          `json:"channel"`
-	Category         string          `json:"category"`
+	SenderID              uuid.UUID              `json:"sender_id" validate:"required"`
+	ReceiverID            uuid.UUID              `json:"receiver_id" validate:"-"`
+	ReceiverWalletID      uuid.UUID              `json:"receiver_wallet_id" validate:"-"`
+	ReceiverWalletAddress string                 `json:"receiver_wallet_number" validate:"-"`
+	Amount                decimal.Decimal        `json:"amount" validate:"required,gt=0"`
+	Currency              domain.Currency        `json:"currency" validate:"required"`
+	DestinationCurrency   domain.Currency        `json:"destination_currency"`
+	Description           string                 `json:"description"`
+	Channel               string                 `json:"channel"`
+	Category              string                 `json:"category"`
+	Reference             string                 `json:"reference"` // Idempotency Key
+	DeviceID              string                 `json:"device_id"`
+	Location              string                 `json:"location"`
+	Metadata              map[string]interface{} `json:"metadata"`
 }
 
 type PaymentResponse struct {
@@ -67,12 +111,122 @@ type PaymentResponse struct {
 
 // InitiatePayment handles the complete payment flow
 func (s *Service) InitiatePayment(ctx context.Context, req *InitiatePaymentRequest) (*PaymentResponse, error) {
+	// 0. Global Circuit Breaker Check
+	if err := s.riskEngine.CheckGlobalCircuitBreaker(); err != nil {
+		s.logger.Error("Payment blocked by circuit breaker", map[string]interface{}{"error": err.Error()})
+		return nil, err
+	}
+
+	// 0.1 Check Daily Limit
+	dailyTotal, err := s.repo.GetDailyTotal(ctx, req.SenderID, req.Currency)
+	if err != nil {
+		// If we can't fetch daily total, we should probably fail safe or log warning
+		// For banking safety, we fail open but log error, or fail closed?
+		// Fail closed (secure) is better.
+		s.logger.Error("Failed to fetch daily total", map[string]interface{}{"error": err.Error()})
+		return nil, pkgerrors.Wrap(err, "failed to verify daily limit")
+	}
+
+	if err := s.riskEngine.CheckDailyLimit(req.Amount, dailyTotal); err != nil {
+		s.logger.Warn("Transaction blocked by daily limit", map[string]interface{}{
+			"amount":      req.Amount.String(),
+			"daily_total": dailyTotal.String(),
+			"sender_id":   req.SenderID,
+		})
+
+		go func() {
+			_ = s.notifier.Notify(context.Background(), req.SenderID, "RISK_ALERT", map[string]interface{}{
+				"reason": "Daily transaction limit exceeded",
+				"limit":  s.riskEngine.GetConfig().MaxDailyLimit,
+			})
+		}()
+
+		return nil, err
+	}
+
+	// 0.2 Cool-off Check
+	if err := s.riskEngine.CheckCoolOff(req.SenderID, req.Amount); err != nil {
+		s.logger.Warn("Transaction blocked by cool-off", map[string]interface{}{
+			"error": err.Error(),
+		})
+		return nil, err
+	}
+
+	// 0.3 Restricted Country Check
+	if err := s.riskEngine.CheckRestrictedCountry(req.Location); err != nil {
+		s.logger.Warn("Transaction blocked by restricted country", map[string]interface{}{
+			"location":  req.Location,
+			"sender_id": req.SenderID,
+		})
+		return nil, err
+	}
+
 	s.logger.Info("Initiating payment", map[string]interface{}{
-		"sender_id":   req.SenderID,
-		"receiver_id": req.ReceiverID,
-		"amount":      req.Amount,
-		"currency":    req.Currency,
+		"sender_id":               req.SenderID,
+		"receiver_id":             req.ReceiverID,
+		"receiver_wallet_id":      req.ReceiverWalletID,
+		"receiver_wallet_address": req.ReceiverWalletAddress,
+		"amount":                  req.Amount.String(),
+		"currency":                req.Currency,
+		"reference":               req.Reference,
 	})
+
+	// Sanitize inputs to prevent XSS
+	if req.Reference != "" {
+		req.Reference = validator.Sanitize(req.Reference)
+	}
+	req.Description = validator.Sanitize(req.Description)
+	req.Channel = validator.Sanitize(req.Channel)
+	req.Category = validator.Sanitize(req.Category)
+
+	// Fraud Check: Device Trust
+	if req.DeviceID != "" {
+		// Bypass check for internal system scheduler
+		if req.DeviceID == "system-scheduler" && req.Channel == "api" {
+			s.logger.Info("Allowing trusted system scheduler transaction", map[string]interface{}{
+				"user_id": req.SenderID,
+			})
+		} else {
+			trusted, err := s.userRepo.IsDeviceTrusted(ctx, req.SenderID, req.DeviceID)
+			if err != nil {
+				s.logger.Error("Failed to check device trust", map[string]interface{}{
+					"error":     err.Error(),
+					"user_id":   req.SenderID,
+					"device_id": req.DeviceID,
+				})
+				return nil, errors.New("system error: unable to verify device trust")
+			}
+			if !trusted {
+				s.logger.Warn("Blocked transaction from untrusted device", map[string]interface{}{
+					"user_id":   req.SenderID,
+					"device_id": req.DeviceID,
+				})
+				return nil, errors.New("security alert: transaction blocked from new/untrusted device")
+			}
+		}
+	}
+
+	// 0. Idempotency Check
+	if req.Reference != "" {
+		existingTx, err := s.repo.FindByReference(ctx, req.Reference)
+		if err == nil && existingTx != nil {
+			s.logger.Info("Idempotency match found", map[string]interface{}{
+				"reference": req.Reference,
+				"tx_id":     existingTx.ID,
+			})
+			return &PaymentResponse{
+				Transaction: existingTx,
+				Message:     "Transaction already processed (idempotent)",
+			}, nil
+		}
+	} else {
+		req.Reference = s.generateReference()
+	}
+
+	// 0b. Validate amount
+	if req.Amount.LessThanOrEqual(decimal.Zero) {
+		return nil, errors.New("amount must be greater than zero")
+	}
 
 	// 1. Get sender and receiver wallets
 	senderWallet, err := s.walletRepo.FindByUserAndCurrency(ctx, req.SenderID, req.Currency)
@@ -80,21 +234,145 @@ func (s *Service) InitiatePayment(ctx context.Context, req *InitiatePaymentReque
 		return nil, pkgerrors.Wrap(err, "sender wallet not found")
 	}
 
-	// Get receiver's wallet (wallet ID preferred, otherwise by user ID)
-	var receiverWallet *domain.Wallet
-	if req.ReceiverWalletID != uuid.Nil {
-		receiverWallet, err = s.walletRepo.FindByID(ctx, req.ReceiverWalletID)
+	// 1b. Validate Sender KYC Status & Limits
+	sender, err := s.userRepo.FindByID(ctx, req.SenderID)
+	if err != nil {
+		return nil, pkgerrors.Wrap(err, "failed to fetch sender profile")
+	}
+
+	if sender.KYCStatus != domain.KYCStatusVerified {
+		return nil, errors.New("KYC verification required to send funds")
+	}
+
+	// Define limits based on KYC Level
+	// Note: In a production environment, limits should be normalized to a base currency.
+	// Current implementation assumes limits apply to the transaction currency directly.
+	var limit decimal.Decimal
+	switch sender.KYCLevel {
+	case 1:
+		limit = decimal.NewFromInt(50000) // Tier 1: Low limit
+	case 2:
+		limit = decimal.NewFromInt(1000000) // Tier 2: Medium limit
+	case 3:
+		limit = decimal.NewFromInt(10000000) // Tier 3: High limit
+	default:
+		limit = decimal.NewFromInt(0) // Tier 0: No sending
+	}
+
+	if sender.KYCLevel == 0 {
+		return nil, errors.New("KYC Level 1 required to transact")
+	}
+
+	if req.Amount.GreaterThan(limit) {
+		return nil, fmt.Errorf("transaction amount exceeds your KYC Level %d limit of %s", sender.KYCLevel, limit.String())
+	}
+
+	// 1c. Check Daily Velocity Limit
+	// dailyTotal is already fetched at the beginning of the function
+
+	var dailyLimit decimal.Decimal
+	switch sender.KYCLevel {
+	case 1:
+		dailyLimit = decimal.NewFromInt(200000)
+	case 2:
+		dailyLimit = decimal.NewFromInt(5000000)
+	case 3:
+		dailyLimit = decimal.NewFromInt(50000000)
+	default:
+		dailyLimit = decimal.Zero
+	}
+
+	if dailyTotal.Add(req.Amount).GreaterThan(dailyLimit) {
+		return nil, fmt.Errorf("daily transaction limit of %s exceeded (used: %s)", dailyLimit.String(), dailyTotal.String())
+	}
+
+	// 1d. Check Hourly Velocity (Fraud Detection)
+	// General Velocity Check
+	hourlyCount, err := s.repo.GetHourlyCount(ctx, req.SenderID)
+	if err != nil {
+		return nil, pkgerrors.Wrap(err, "failed to check velocity")
+	}
+	if err := s.riskEngine.CheckVelocity(hourlyCount); err != nil {
+		s.logger.Warn("Transaction blocked by velocity check", map[string]interface{}{
+			"user_id":      req.SenderID,
+			"hourly_count": hourlyCount,
+		})
+		return nil, err
+	}
+
+	// Max 3 transactions > HighValueThreshold per hour
+	highValueThreshold := decimal.NewFromInt(s.riskEngine.GetConfig().HighValueThreshold)
+	if req.Amount.GreaterThan(highValueThreshold) {
+		count, err := s.repo.GetHourlyHighValueCount(ctx, req.SenderID, highValueThreshold)
 		if err != nil {
-			return nil, pkgerrors.Wrap(err, "receiver wallet not found")
+			return nil, pkgerrors.Wrap(err, "failed to check hourly velocity")
 		}
-		// Ensure ReceiverID is set from wallet owner
-		req.ReceiverID = receiverWallet.UserID
-	} else {
-		receiverWallet, err = s.getReceiverWallet(ctx, req.ReceiverID, req.Currency)
-		if err != nil {
-			return nil, pkgerrors.Wrap(err, "receiver wallet not found")
+		if count >= 3 {
+			return nil, errors.New("velocity limit exceeded: too many high-value transactions in the last hour")
 		}
 	}
+
+	// 1e. Advanced Risk Analysis & Cool-off
+	if err := s.riskEngine.CheckCoolOff(req.SenderID, req.Amount); err != nil {
+		return nil, err
+	}
+
+	// 1f. Behavioral Anomaly Detection
+	anomalies, err := s.monitor.DetectAnomalies(req.SenderID, req.Amount, req.ReceiverID.String())
+	if err == nil && len(anomalies) > 0 {
+		for _, anomaly := range anomalies {
+			s.logger.Warn("Behavioral anomaly detected", map[string]interface{}{
+				"user_id":     req.SenderID,
+				"type":        anomaly.Type,
+				"description": anomaly.Description,
+				"severity":    anomaly.Severity,
+			})
+
+			// If HIGH severity, block or require 2FA (for now, block)
+			if anomaly.Severity == "HIGH" {
+				// Notify user
+				go func() {
+					_ = s.notifier.Notify(context.Background(), req.SenderID, "SECURITY_ALERT", map[string]interface{}{
+						"reason": anomaly.Description,
+					})
+				}()
+				return nil, fmt.Errorf("security alert: %s", anomaly.Description)
+			}
+		}
+	}
+
+	// Evaluate Risk Score
+	// We assume device is trusted here because of earlier check (lines 106-123)
+	riskScore := s.riskEngine.EvaluateRisk(req.Amount, sender.KYCLevel, false, req.Location)
+	if riskScore >= risk.RiskScoreCritical {
+		s.logger.Error("Transaction blocked due to CRITICAL risk score", map[string]interface{}{
+			"risk_score": riskScore,
+			"amount":     req.Amount.String(),
+			"sender_id":  req.SenderID,
+		})
+
+		// Notify user about risk block
+		go func() {
+			_ = s.notifier.Notify(context.Background(), req.SenderID, "RISK_ALERT", map[string]interface{}{
+				"reason": "Transaction blocked due to high risk score",
+				"amount": req.Amount.String(),
+			})
+		}()
+
+		return nil, errors.New("transaction blocked by risk engine")
+	}
+
+	// Get receiver's wallet (wallet number ONLY)
+	var receiverWallet *domain.Wallet
+
+	// Strict mode: Only use wallet address (number)
+	req.ReceiverID = uuid.Nil // Reset to ensure we lookup via wallet
+
+	receiverWallet, err = s.walletRepo.FindByAddress(ctx, req.ReceiverWalletAddress)
+	if err != nil {
+		return nil, pkgerrors.Wrap(err, "receiver wallet not found")
+	}
+	req.ReceiverID = receiverWallet.UserID
 
 	// 2. Check if currency conversion needed
 	exchangeRate := decimal.NewFromInt(1)
@@ -123,9 +401,14 @@ func (s *Service) InitiatePayment(ctx context.Context, req *InitiatePaymentReque
 	}
 
 	// 5. Create transaction record
+	initialStatus := domain.TransactionStatusPending
+	if s.riskEngine.RequiresAdminApproval(req.Amount) {
+		initialStatus = domain.TransactionStatusPendingApproval
+	}
+
 	tx := &domain.Transaction{
 		ID:                uuid.New(),
-		Reference:         s.generateReference(),
+		Reference:         req.Reference,
 		SenderID:          req.SenderID,
 		ReceiverID:        req.ReceiverID,
 		SenderWalletID:    senderWallet.ID,
@@ -138,12 +421,12 @@ func (s *Service) InitiatePayment(ctx context.Context, req *InitiatePaymentReque
 		FeeAmount:         feeAmount,
 		FeeCurrency:       req.Currency,
 		NetAmount:         convertedAmount,
-		Status:            domain.TransactionStatusPending,
+		Status:            initialStatus,
 		TransactionType:   domain.TransactionTypePayment,
 		Channel:           &req.Channel,
 		Category:          &req.Category,
 		Description:       &req.Description,
-		Metadata:          make(domain.Metadata),
+		Metadata:          req.Metadata,
 		InitiatedAt:       time.Now(),
 		CreatedAt:         time.Now(),
 		UpdatedAt:         time.Now(),
@@ -151,6 +434,20 @@ func (s *Service) InitiatePayment(ctx context.Context, req *InitiatePaymentReque
 
 	// Persist initial transaction record (pending)
 	if err := s.repo.Create(ctx, tx); err != nil {
+		if errors.Is(err, pkgerrors.ErrTransactionAlreadyExists) {
+			existingTx, findErr := s.repo.FindByReference(ctx, tx.Reference)
+			if findErr == nil && existingTx != nil {
+				s.logger.Info("Idempotency match found during create", map[string]interface{}{
+					"reference": tx.Reference,
+					"tx_id":     existingTx.ID,
+				})
+				return &PaymentResponse{
+					Transaction: existingTx,
+					Message:     "Transaction already processed (idempotent)",
+				}, nil
+			}
+		}
+
 		s.logger.Error("Transaction create failed", map[string]interface{}{
 			"error":              err.Error(),
 			"transaction_id":     tx.ID,
@@ -170,8 +467,30 @@ func (s *Service) InitiatePayment(ctx context.Context, req *InitiatePaymentReque
 		return nil, err
 	}
 
+	// Check if transaction requires admin approval
+	if tx.Status == domain.TransactionStatusPendingApproval {
+		s.logger.Info("Transaction queued for admin approval", map[string]interface{}{
+			"tx_id":  tx.ID,
+			"amount": tx.Amount.String(),
+		})
+
+		// Send notification to admin (simulated) or user
+		go func() {
+			_ = s.notifier.Notify(context.Background(), req.SenderID, "TRANSACTION_PENDING_APPROVAL", map[string]interface{}{
+				"amount": req.Amount.String(),
+				"reason": "Amount exceeds automatic approval threshold",
+			})
+		}()
+
+		return &PaymentResponse{
+			Transaction: tx,
+			Message:     "Transaction submitted for admin approval",
+		}, nil
+	}
+
 	// 6. Process payment atomically
 	if err := s.processPayment(ctx, tx, senderWallet, receiverWallet, totalDebit); err != nil {
+		s.riskEngine.ReportFailure()
 		tx.Status = domain.TransactionStatusFailed
 		reason := err.Error()
 		tx.StatusReason = &reason
@@ -189,11 +508,19 @@ func (s *Service) InitiatePayment(ctx context.Context, req *InitiatePaymentReque
 			"exchange_rate":      tx.ExchangeRate.String(),
 			"fee_amount":         tx.FeeAmount.String(),
 		})
-		_ = s.repo.Update(ctx, tx)
+		if updateErr := s.repo.Update(ctx, tx); updateErr != nil {
+			s.logger.Error("Failed to update transaction status to failed", map[string]interface{}{
+				"error":          updateErr.Error(),
+				"transaction_id": tx.ID,
+			})
+		}
 		return nil, err
 	}
 
-	tx.Status = domain.TransactionStatusCompleted
+	s.riskEngine.ReportSuccess()
+
+	// 7. Mark as pending settlement (so Settlement Service picks it up)
+	tx.Status = domain.TransactionStatusPendingSettlement
 	now := time.Now()
 	tx.CompletedAt = &now
 	tx.UpdatedAt = now
@@ -213,13 +540,101 @@ func (s *Service) InitiatePayment(ctx context.Context, req *InitiatePaymentReque
 		"reference":      tx.Reference,
 	})
 
-	if err := s.notifyReceiverTopUp(ctx, tx); err != nil {
-		s.logger.Warn("Notification failed", map[string]interface{}{"error": err.Error(), "transaction_id": tx.ID})
-	}
+	// Behavioral Monitoring (Async - Record Update)
+	go func() {
+		s.monitor.RecordTransaction(req.SenderID, req.Amount, req.ReceiverID.String(), "Unknown Location")
+	}()
+
+	// Real Notification
+	go func() {
+		// Notify Sender
+		_ = s.notifier.Notify(context.Background(), req.SenderID, "PAYMENT_SENT", map[string]interface{}{
+			"amount":        req.Amount.String(),
+			"currency":      req.Currency,
+			"receiver_name": req.ReceiverID.String(), // Ideally name, but ID for now
+		})
+
+		// Notify Receiver
+		_ = s.notifier.Notify(context.Background(), req.ReceiverID, "PAYMENT_RECEIVED", map[string]interface{}{
+			"amount":      tx.ConvertedAmount.String(),
+			"currency":    tx.ConvertedCurrency,
+			"sender_name": req.SenderID.String(),
+		})
+	}()
 
 	return &PaymentResponse{
 		Transaction: tx,
 		Message:     "Payment processed successfully",
+	}, nil
+}
+
+type Receipt struct {
+	TransactionID uuid.UUID       `json:"transaction_id"`
+	Reference     string          `json:"reference"`
+	Date          time.Time       `json:"date"`
+	SenderName    string          `json:"sender_name"`
+	ReceiverName  string          `json:"receiver_name"`
+	Amount        decimal.Decimal `json:"amount"`
+	Currency      domain.Currency `json:"currency"`
+	Fee           decimal.Decimal `json:"fee"`
+	TotalDebited  decimal.Decimal `json:"total_debited"`
+	Status        string          `json:"status"`
+	Description   string          `json:"description"`
+}
+
+type ReceiverInfo struct {
+	Name string `json:"name"`
+}
+
+func (s *Service) GetReceiverInfo(ctx context.Context, walletNumber string) (*ReceiverInfo, error) {
+	wallet, err := s.walletRepo.FindByAddress(ctx, walletNumber)
+	if err != nil {
+		return nil, pkgerrors.Wrap(err, "wallet not found")
+	}
+
+	user, err := s.userRepo.FindByID(ctx, wallet.UserID)
+	if err != nil {
+		return nil, pkgerrors.Wrap(err, "user not found")
+	}
+
+	return &ReceiverInfo{
+		Name: fmt.Sprintf("%s %s", user.FirstName, user.LastName),
+	}, nil
+}
+
+func (s *Service) GetReceipt(ctx context.Context, txID uuid.UUID, userID uuid.UUID) (*Receipt, error) {
+	tx, err := s.repo.FindByID(ctx, txID)
+	if err != nil {
+		return nil, err
+	}
+
+	// Security Check: Ensure the user is either the sender or receiver
+	if tx.SenderID != userID && tx.ReceiverID != userID {
+		return nil, errors.New("unauthorized access to transaction receipt")
+	}
+
+	sender, err := s.userRepo.FindByID(ctx, tx.SenderID)
+	if err != nil {
+		return nil, errors.New("failed to fetch sender details")
+	}
+
+	receiver, err := s.userRepo.FindByID(ctx, tx.ReceiverID)
+	if err != nil {
+		return nil, errors.New("failed to fetch receiver details")
+	}
+
+	return &Receipt{
+		TransactionID: tx.ID,
+		Reference:     tx.Reference,
+		Date:          tx.CreatedAt,
+		SenderName:    fmt.Sprintf("%s %s", sender.FirstName, sender.LastName),
+		ReceiverName:  fmt.Sprintf("%s %s", receiver.FirstName, receiver.LastName),
+		Amount:        tx.Amount,
+		Currency:      tx.Currency,
+		Fee:           tx.FeeAmount,
+		TotalDebited:  tx.Amount.Add(tx.FeeAmount),
+		Status:        string(tx.Status),
+		Description:   *tx.Description,
 	}, nil
 }
 
@@ -243,19 +658,60 @@ func (s *Service) processPayment(
 	})
 }
 
-func (s *Service) getReceiverWallet(ctx context.Context, userID uuid.UUID, currency domain.Currency) (*domain.Wallet, error) {
-	// Try to get wallet in same currency
-	wallet, err := s.walletRepo.FindByUserAndCurrency(ctx, userID, currency)
-	if err == nil {
-		return wallet, nil
-	}
-
-	// If not found, get user's primary wallet
+func (s *Service) getReceiverWallet(ctx context.Context, userID uuid.UUID, currency, destinationCurrency domain.Currency) (*domain.Wallet, error) {
+	// Optimization: Fetch all wallets for the user in one go to reduce DB round trips
 	wallets, err := s.walletRepo.FindByUserID(ctx, userID)
 	if err != nil || len(wallets) == 0 {
 		return nil, pkgerrors.ErrWalletNotFound
 	}
 
+	// 1. If destination currency is specified, try to find THAT wallet
+	if destinationCurrency != "" {
+		for _, w := range wallets {
+			if w.Currency == destinationCurrency {
+				return w, nil
+			}
+		}
+		// If explicit destination currency requested but not found, return error
+		return nil, pkgerrors.Wrap(fmt.Errorf("receiver has no %s wallet", destinationCurrency), "wallet not found")
+	}
+
+	// 2. Fallback: Try to get wallet in same currency as sender
+	for _, w := range wallets {
+		if w.Currency == currency {
+			return w, nil
+		}
+	}
+
+	// 3. Try default currency based on user's country
+	user, err := s.userRepo.FindByID(ctx, userID)
+	if err == nil {
+		var defaultCurrency domain.Currency
+		switch user.CountryCode {
+		case "MW":
+			defaultCurrency = "MWK"
+		case "CN":
+			defaultCurrency = "CNY"
+		case "US":
+			defaultCurrency = "USD"
+		case "ZA":
+			defaultCurrency = "ZAR"
+		case "GB":
+			defaultCurrency = "GBP"
+		case "EU":
+			defaultCurrency = "EUR"
+		}
+
+		if defaultCurrency != "" {
+			for _, w := range wallets {
+				if w.Currency == defaultCurrency {
+					return w, nil
+				}
+			}
+		}
+	}
+
+	// 4. Fallback: get user's primary wallet (first one found)
 	return wallets[0], nil
 }
 
@@ -267,7 +723,7 @@ func (s *Service) GetTransaction(ctx context.Context, id uuid.UUID) (*domain.Tra
 	return s.repo.FindByID(ctx, id)
 }
 
-func (s *Service) GetUserTransactions(ctx context.Context, userID uuid.UUID, limit, offset int) ([]*domain.Transaction, int, error) {
+func (s *Service) GetUserTransactions(ctx context.Context, userID uuid.UUID, limit, offset int) ([]*TransactionDetail, int, error) {
 	txs, err := s.repo.FindByUserID(ctx, userID, limit, offset)
 	if err != nil {
 		return nil, 0, err
@@ -276,7 +732,65 @@ func (s *Service) GetUserTransactions(ctx context.Context, userID uuid.UUID, lim
 	if err != nil {
 		return nil, 0, err
 	}
-	return txs, total, nil
+
+	var details []*TransactionDetail
+	for _, tx := range txs {
+		detail := &TransactionDetail{Transaction: tx}
+
+		// Enrich with Names
+		if sender, err := s.userRepo.FindByID(ctx, tx.SenderID); err == nil {
+			detail.SenderName = sender.FirstName + " " + sender.LastName
+		}
+		if receiver, err := s.userRepo.FindByID(ctx, tx.ReceiverID); err == nil {
+			detail.ReceiverName = receiver.FirstName + " " + receiver.LastName
+		}
+
+		// Enrich with Wallet Numbers
+		if sWallet, err := s.walletRepo.FindByID(ctx, tx.SenderWalletID); err == nil && sWallet.WalletAddress != nil {
+			detail.SenderWalletNumber = *sWallet.WalletAddress
+		}
+		if rWallet, err := s.walletRepo.FindByID(ctx, tx.ReceiverWalletID); err == nil && rWallet.WalletAddress != nil {
+			detail.ReceiverWalletNumber = *rWallet.WalletAddress
+		}
+		details = append(details, detail)
+	}
+
+	return details, total, nil
+}
+
+func (s *Service) GetAllTransactions(ctx context.Context, limit, offset int) ([]*TransactionDetail, int, error) {
+	txs, err := s.repo.FindAll(ctx, limit, offset)
+	if err != nil {
+		return nil, 0, err
+	}
+	total, err := s.repo.CountAll(ctx)
+	if err != nil {
+		return nil, 0, err
+	}
+
+	var details []*TransactionDetail
+	for _, tx := range txs {
+		detail := &TransactionDetail{Transaction: tx}
+
+		// Enrich with Names
+		if sender, err := s.userRepo.FindByID(ctx, tx.SenderID); err == nil {
+			detail.SenderName = sender.FirstName + " " + sender.LastName
+		}
+		if receiver, err := s.userRepo.FindByID(ctx, tx.ReceiverID); err == nil {
+			detail.ReceiverName = receiver.FirstName + " " + receiver.LastName
+		}
+
+		// Enrich with Wallet Numbers
+		if sWallet, err := s.walletRepo.FindByID(ctx, tx.SenderWalletID); err == nil && sWallet.WalletAddress != nil {
+			detail.SenderWalletNumber = *sWallet.WalletAddress
+		}
+		if rWallet, err := s.walletRepo.FindByID(ctx, tx.ReceiverWalletID); err == nil && rWallet.WalletAddress != nil {
+			detail.ReceiverWalletNumber = *rWallet.WalletAddress
+		}
+		details = append(details, detail)
+	}
+
+	return details, total, nil
 }
 
 // Repository interfaces
@@ -287,12 +801,42 @@ type Repository interface {
 	FindByReference(ctx context.Context, ref string) (*domain.Transaction, error)
 	FindByUserID(ctx context.Context, userID uuid.UUID, limit, offset int) ([]*domain.Transaction, error)
 	CountByUserID(ctx context.Context, userID uuid.UUID) (int, error)
+	GetDailyTotal(ctx context.Context, userID uuid.UUID, currency domain.Currency) (decimal.Decimal, error)
+	GetHourlyHighValueCount(ctx context.Context, userID uuid.UUID, threshold decimal.Decimal) (int, error)
+	GetHourlyCount(ctx context.Context, userID uuid.UUID) (int, error)
+	FindByStatus(ctx context.Context, status domain.TransactionStatus, limit, offset int) ([]*domain.Transaction, error)
+	CountByStatus(ctx context.Context, status domain.TransactionStatus) (int, error)
+	SumVolume(ctx context.Context) (decimal.Decimal, error)
+	SumEarnings(ctx context.Context) (decimal.Decimal, error)
+	CountAll(ctx context.Context) (int, error)
+	FindAll(ctx context.Context, limit, offset int) ([]*domain.Transaction, error)
+	FindFlagged(ctx context.Context, limit, offset int) ([]*domain.Transaction, error)
+}
+
+type AuditRepository interface {
+	Create(ctx context.Context, log *domain.AuditLog) error
+	FindByUserID(ctx context.Context, userID uuid.UUID, limit, offset int) ([]*domain.AuditLog, error)
+	FindAll(ctx context.Context, limit, offset int) ([]*domain.AuditLog, error)
+	CountAll(ctx context.Context) (int, error)
+}
+
+func (s *Service) GetAuditLogs(ctx context.Context, limit, offset int) ([]*domain.AuditLog, int, error) {
+	logs, err := s.auditRepo.FindAll(ctx, limit, offset)
+	if err != nil {
+		return nil, 0, err
+	}
+	total, err := s.auditRepo.CountAll(ctx)
+	if err != nil {
+		return nil, 0, err
+	}
+	return logs, total, nil
 }
 
 type WalletRepository interface {
 	FindByID(ctx context.Context, id uuid.UUID) (*domain.Wallet, error)
 	FindByUserID(ctx context.Context, userID uuid.UUID) ([]*domain.Wallet, error)
 	FindByUserAndCurrency(ctx context.Context, userID uuid.UUID, currency domain.Currency) (*domain.Wallet, error)
+	FindByAddress(ctx context.Context, address string) (*domain.Wallet, error)
 	DebitWallet(ctx context.Context, walletID uuid.UUID, amount decimal.Decimal) error
 	CreditWallet(ctx context.Context, walletID uuid.UUID, amount decimal.Decimal) error
 }
@@ -307,6 +851,8 @@ type LedgerService interface {
 
 type UserRepository interface {
 	FindByID(ctx context.Context, id uuid.UUID) (*domain.User, error)
+	IsDeviceTrusted(ctx context.Context, userID uuid.UUID, deviceHash string) (bool, error)
+	IsCountryTrusted(ctx context.Context, userID uuid.UUID, countryCode string) (bool, error)
 }
 
 func (s *Service) CancelTransaction(ctx context.Context, txID, userID uuid.UUID) error {
@@ -338,10 +884,11 @@ type BulkPaymentRequest struct {
 }
 
 type PaymentItem struct {
-	ReceiverID  uuid.UUID       `json:"receiver_id" validate:"required"`
-	Amount      decimal.Decimal `json:"amount" validate:"required,gt=0"`
-	Currency    domain.Currency `json:"currency" validate:"required"`
-	Description string          `json:"description"`
+	ReceiverID          uuid.UUID       `json:"receiver_id" validate:"required"`
+	Amount              decimal.Decimal `json:"amount" validate:"required,gt=0"`
+	Currency            domain.Currency `json:"currency" validate:"required"`
+	DestinationCurrency domain.Currency `json:"destination_currency"`
+	Description         string          `json:"description"`
 }
 
 type BulkPaymentResult struct {
@@ -364,11 +911,12 @@ func (s *Service) BulkPayment(ctx context.Context, req *BulkPaymentRequest) (*Bu
 
 	for _, item := range req.Payments {
 		paymentReq := &InitiatePaymentRequest{
-			SenderID:    req.SenderID,
-			ReceiverID:  item.ReceiverID,
-			Amount:      item.Amount,
-			Currency:    item.Currency,
-			Description: item.Description,
+			SenderID:            req.SenderID,
+			ReceiverID:          item.ReceiverID,
+			Amount:              item.Amount,
+			Currency:            item.Currency,
+			DestinationCurrency: item.DestinationCurrency,
+			Description:         item.Description,
 		}
 
 		response, err := s.InitiatePayment(ctx, paymentReq)
@@ -386,23 +934,192 @@ func (s *Service) BulkPayment(ctx context.Context, req *BulkPaymentRequest) (*Bu
 	return result, nil
 }
 
-func (s *Service) notifyReceiverTopUp(ctx context.Context, tx *domain.Transaction) error {
-	// Fetch receiver user
-	receiver, err := s.userRepo.FindByID(ctx, tx.ReceiverID)
+// Admin Methods
+
+func (s *Service) GetPendingTransactions(ctx context.Context, limit, offset int) ([]*TransactionDetail, int, error) {
+	txs, err := s.repo.FindByStatus(ctx, domain.TransactionStatusPendingApproval, limit, offset)
+	if err != nil {
+		return nil, 0, err
+	}
+	total, err := s.repo.CountByStatus(ctx, domain.TransactionStatusPendingApproval)
+	if err != nil {
+		return nil, 0, err
+	}
+
+	var details []*TransactionDetail
+	for _, tx := range txs {
+		detail := &TransactionDetail{Transaction: tx}
+		// Enrich with names/wallet numbers (optional, can skip if slow)
+		if sender, err := s.userRepo.FindByID(ctx, tx.SenderID); err == nil {
+			detail.SenderName = sender.FirstName + " " + sender.LastName
+		}
+		if receiver, err := s.userRepo.FindByID(ctx, tx.ReceiverID); err == nil {
+			detail.ReceiverName = receiver.FirstName + " " + receiver.LastName
+		}
+		details = append(details, detail)
+	}
+
+	return details, total, nil
+}
+
+func (s *Service) ReviewTransaction(ctx context.Context, txID uuid.UUID, adminID uuid.UUID, action string, reason string) error {
+	tx, err := s.repo.FindByID(ctx, txID)
 	if err != nil {
 		return err
 	}
-	// Only notify Chinese users receiving CNY
-	if receiver.CountryCode != "CN" || tx.ConvertedCurrency != domain.CNY {
-		return nil
+
+	if tx.Status != domain.TransactionStatusPendingApproval {
+		return errors.New("transaction is not pending approval")
 	}
-	s.logger.Info("Wallet top-up notification", map[string]interface{}{
-		"user_id":           receiver.ID,
-		"country_code":      receiver.CountryCode,
-		"wallet_id":         tx.ReceiverWalletID,
-		"amount_cny":        tx.ConvertedAmount.String(),
-		"transaction_ref":   tx.Reference,
-		"notification_type": "wallet_topup",
+
+	if action == "approve" {
+		// Proceed with payment processing
+		s.logger.Info("Admin approving transaction", map[string]interface{}{"tx_id": txID, "admin_id": adminID})
+
+		// Fetch wallets
+		senderWallet, err := s.walletRepo.FindByID(ctx, tx.SenderWalletID)
+		if err != nil {
+			return err
+		}
+		receiverWallet, err := s.walletRepo.FindByID(ctx, tx.ReceiverWalletID)
+		if err != nil {
+			return err
+		}
+
+		// Calculate Debit Amount (Original Amount + Fee)
+		totalDebit := tx.Amount.Add(tx.FeeAmount)
+
+		// Process payment atomically
+		if err := s.processPayment(ctx, tx, senderWallet, receiverWallet, totalDebit); err != nil {
+			s.logger.Error("Admin approval failed at ledger", map[string]interface{}{"error": err.Error()})
+			return err
+		}
+
+		// Update Status
+		tx.Status = domain.TransactionStatusPendingSettlement
+		now := time.Now()
+		tx.CompletedAt = &now
+		tx.UpdatedAt = now
+		if tx.Metadata == nil {
+			tx.Metadata = make(domain.Metadata)
+		}
+		tx.Metadata["approved_by"] = adminID.String()
+		tx.Metadata["approved_at"] = now
+
+		if err := s.repo.Update(ctx, tx); err != nil {
+			return err
+		}
+
+		// Notify
+		go func() {
+			_ = s.notifier.Notify(context.Background(), tx.SenderID, "TRANSACTION_APPROVED", map[string]interface{}{"tx_id": txID})
+		}()
+
+	} else if action == "reject" {
+		s.logger.Info("Admin rejecting transaction", map[string]interface{}{"tx_id": txID, "admin_id": adminID, "reason": reason})
+
+		tx.Status = domain.TransactionStatusFailed
+		failReason := fmt.Sprintf("Admin rejected: %s", reason)
+		tx.StatusReason = &failReason
+		tx.UpdatedAt = time.Now()
+		if tx.Metadata == nil {
+			tx.Metadata = make(domain.Metadata)
+		}
+		tx.Metadata["rejected_by"] = adminID.String()
+		tx.Metadata["rejection_reason"] = reason
+
+		if err := s.repo.Update(ctx, tx); err != nil {
+			return err
+		}
+
+		// Notify
+		go func() {
+			_ = s.notifier.Notify(context.Background(), tx.SenderID, "TRANSACTION_REJECTED", map[string]interface{}{"tx_id": txID, "reason": reason})
+		}()
+	} else {
+		return errors.New("invalid action: must be 'approve' or 'reject'")
+	}
+
+	return nil
+}
+
+type SystemStats struct {
+	TotalTransactions int             `json:"total_transactions"`
+	TotalVolume       decimal.Decimal `json:"total_volume"`
+	TotalEarnings     decimal.Decimal `json:"total_earnings"`
+	PendingApprovals  int             `json:"pending_approvals"`
+}
+
+func (s *Service) GetSystemStats(ctx context.Context) (*SystemStats, error) {
+	totalTx, err := s.repo.CountAll(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	volume, err := s.repo.SumVolume(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	earnings, err := s.repo.SumEarnings(ctx)
+	if err != nil {
+		return nil, err
+	}
+
+	pending, err := s.repo.CountByStatus(ctx, domain.TransactionStatusPendingApproval)
+	if err != nil {
+		return nil, err
+	}
+
+	return &SystemStats{
+		TotalTransactions: totalTx,
+		TotalVolume:       volume,
+		TotalEarnings:     earnings,
+		PendingApprovals:  pending,
+	}, nil
+}
+
+func (s *Service) GetDisputes(ctx context.Context, limit, offset int) ([]*domain.Transaction, int, error) {
+	txs, err := s.repo.FindByStatus(ctx, domain.TransactionStatusDisputed, limit, offset)
+	if err != nil {
+		return nil, 0, err
+	}
+	count, err := s.repo.CountByStatus(ctx, domain.TransactionStatusDisputed)
+	if err != nil {
+		return nil, 0, err
+	}
+	return txs, count, nil
+}
+
+func (s *Service) GetRiskAlerts(ctx context.Context, limit, offset int) ([]*TransactionDetail, error) {
+	txs, err := s.repo.FindFlagged(ctx, limit, offset)
+	if err != nil {
+		return nil, err
+	}
+
+	var details []*TransactionDetail
+	for _, tx := range txs {
+		detail := &TransactionDetail{Transaction: tx}
+		// Enrich with names
+		if sender, err := s.userRepo.FindByID(ctx, tx.SenderID); err == nil {
+			detail.SenderName = sender.FirstName + " " + sender.LastName
+		}
+		if receiver, err := s.userRepo.FindByID(ctx, tx.ReceiverID); err == nil {
+			detail.ReceiverName = receiver.FirstName + " " + receiver.LastName
+		}
+		details = append(details, detail)
+	}
+
+	return details, nil
+}
+
+func (s *Service) notifyReceiverTopUp(ctx context.Context, tx *domain.Transaction) error {
+	// In a real system, this would push a notification (email/SMS/push)
+	// For now, we just log it
+	s.logger.Info("Notification sent to receiver", map[string]interface{}{
+		"receiver_id": tx.ReceiverID,
+		"amount":      tx.ConvertedAmount.String(),
+		"currency":    tx.ConvertedCurrency,
 	})
 	return nil
 }

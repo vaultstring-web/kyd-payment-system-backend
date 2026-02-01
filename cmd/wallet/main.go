@@ -5,6 +5,8 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"fmt"
 	"net/http"
 	"os"
@@ -20,6 +22,7 @@ import (
 	"kyd/internal/handler"
 	"kyd/internal/middleware"
 	"kyd/internal/repository/postgres"
+	"kyd/internal/security"
 	"kyd/internal/wallet"
 	"kyd/pkg/config"
 	"kyd/pkg/logger"
@@ -68,12 +71,21 @@ func main() {
 
 	log.Info("Redis connected", nil)
 
+	// Initialize security service
+	cryptoService, err := security.NewCryptoService()
+	if err != nil {
+		log.Fatal("Failed to initialize crypto service", map[string]interface{}{
+			"error": err.Error(),
+		})
+	}
+
 	// Initialize repositories
 	walletRepo := postgres.NewWalletRepository(db)
-	userRepo := postgres.NewUserRepository(db)
+	userRepo := postgres.NewUserRepository(db, cryptoService)
+	txRepo := postgres.NewTransactionRepository(db)
 
 	// Initialize services
-	walletService := wallet.NewService(walletRepo, userRepo, log)
+	walletService := wallet.NewService(walletRepo, txRepo, userRepo, log)
 
 	// Initialize handlers
 	val := validator.New()
@@ -89,9 +101,10 @@ func main() {
 	r.Use(middleware.CorrelationID)
 	r.Use(middleware.NewLoggingMiddleware(log).Log)
 	r.Use(middleware.BodyLimit(1 << 20)) // 1MB global cap
-	r.Use(middleware.NewRateLimiter(redisClient, 120, time.Minute).Limit)
+	r.Use(middleware.NewRateLimiter(redisClient, 120, time.Minute).WithAdaptive(10, 30*time.Minute).Limit)
 
-	authMW := middleware.NewAuthMiddleware(cfg.JWT.Secret)
+	blacklist := middleware.NewRedisTokenBlacklist(redisClient)
+	authMW := middleware.NewAuthMiddleware(cfg.JWT.Secret, blacklist)
 
 	// Routes
 	r.HandleFunc("/health", healthCheck).Methods("GET")
@@ -100,9 +113,11 @@ func main() {
 	// Protected routes
 	api := r.PathPrefix("/api/v1").Subrouter()
 	api.Use(authMW.Authenticate)
-	api.Use(middleware.NewRateLimiter(redisClient, 80, time.Minute).Limit)
+	api.Use(middleware.NewRateLimiter(redisClient, 80, time.Minute).WithAdaptive(5, 15*time.Minute).Limit)
 
 	api.HandleFunc("/wallets", walletHandler.CreateWallet).Methods("POST")
+	api.HandleFunc("/wallets/search", walletHandler.SearchWallets).Methods("GET")
+	api.HandleFunc("/wallets/lookup", walletHandler.LookupWallet).Methods("GET")
 	api.HandleFunc("/wallets", walletHandler.GetUserWallets).Methods("GET")
 	api.HandleFunc("/wallets/{id}", walletHandler.GetWallet).Methods("GET")
 	api.HandleFunc("/wallets/{id}/balance", walletHandler.GetBalance).Methods("GET")
@@ -117,12 +132,37 @@ func main() {
 		IdleTimeout:  cfg.Server.IdleTimeout,
 	}
 
+	if cfg.Server.UseTLS {
+		// Load CA cert for client auth
+		caCert, err := os.ReadFile(cfg.Server.CAFile)
+		if err != nil {
+			log.Fatal("Failed to read CA file", map[string]interface{}{"error": err.Error()})
+		}
+		caCertPool := x509.NewCertPool()
+		caCertPool.AppendCertsFromPEM(caCert)
+
+		srv.TLSConfig = &tls.Config{
+			ClientCAs:  caCertPool,
+			ClientAuth: tls.RequireAndVerifyClientCert,
+			MinVersion: tls.VersionTLS12,
+		}
+	}
+
 	// Graceful shutdown
 	go func() {
 		log.Info("Wallet service started", map[string]interface{}{
 			"address": srv.Addr,
+			"tls":     cfg.Server.UseTLS,
 		})
-		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+
+		var err error
+		if cfg.Server.UseTLS {
+			err = srv.ListenAndServeTLS(cfg.Server.CertFile, cfg.Server.KeyFile)
+		} else {
+			err = srv.ListenAndServe()
+		}
+
+		if err != nil && err != http.ErrServerClosed {
 			log.Fatal("Server failed to start", map[string]interface{}{
 				"error": err.Error(),
 			})

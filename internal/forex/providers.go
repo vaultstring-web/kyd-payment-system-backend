@@ -40,7 +40,7 @@ type erAPIResponse struct {
 func NewExchangeRateAPIProvider() *ExchangeRateAPIProvider {
 	return &ExchangeRateAPIProvider{
 		client: &http.Client{
-			Timeout: 10 * time.Second,
+			Timeout: 2 * time.Second,
 		},
 		cache:    make(map[string]cachedRates),
 		cacheTTL: 5 * time.Minute,

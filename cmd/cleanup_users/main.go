@@ -7,16 +7,30 @@ import (
 	"os"
 	"strings"
 
+	"kyd/internal/security"
+
 	_ "github.com/lib/pq"
 )
 
 func main() {
+	// Initialize security service for blind index generation
+	cryptoService, err := security.NewCryptoService()
+	if err != nil {
+		log.Fatalf("Failed to initialize crypto service: %v", err)
+	}
+
 	emails := []string{
 		"admin@example.com",
 		"john.doe@example.com",
 		"jane.smith@example.com",
 		"new.user@example.com",
 		"alice.mw.001@example.com",
+	}
+
+	// Compute blind indexes for emails
+	emailHashes := make([]string, len(emails))
+	for i, email := range emails {
+		emailHashes[i] = cryptoService.BlindIndex(email)
 	}
 
 	{
@@ -51,23 +65,24 @@ func main() {
 		log.Fatalf("tx begin error: %v", err)
 	}
 
-	ph := make([]string, len(emails))
-	args := make([]interface{}, len(emails))
-	for i, e := range emails {
+	ph := make([]string, len(emailHashes))
+	args := make([]interface{}, len(emailHashes))
+	for i, hash := range emailHashes {
 		ph[i] = fmt.Sprintf("$%d", i+1)
-		args[i] = e
+		args[i] = hash
 	}
 	notIn := "NOT IN (" + strings.Join(ph, ",") + ")"
 
+	// Use email_hash for lookups since email is encrypted
 	ledgerSQL := fmt.Sprintf(`
 		DELETE FROM customer_schema.ledger_entries
 		WHERE transaction_id IN (
 			SELECT id FROM customer_schema.transactions
 			WHERE sender_id IN (
-				SELECT id FROM customer_schema.users WHERE email %s
+				SELECT id FROM customer_schema.users WHERE email_hash %s
 			)
 			OR receiver_id IN (
-				SELECT id FROM customer_schema.users WHERE email %s
+				SELECT id FROM customer_schema.users WHERE email_hash %s
 			)
 		)
 	`, notIn, notIn)
@@ -79,10 +94,10 @@ func main() {
 	txSQL := fmt.Sprintf(`
 		DELETE FROM customer_schema.transactions
 		WHERE sender_id IN (
-			SELECT id FROM customer_schema.users WHERE email %s
+			SELECT id FROM customer_schema.users WHERE email_hash %s
 		)
 		OR receiver_id IN (
-			SELECT id FROM customer_schema.users WHERE email %s
+			SELECT id FROM customer_schema.users WHERE email_hash %s
 		)
 	`, notIn, notIn)
 	if _, err := tx.Exec(txSQL, args...); err != nil {
@@ -93,7 +108,7 @@ func main() {
 	auditSQL := fmt.Sprintf(`
 		DELETE FROM admin_schema.audit_logs
 		WHERE user_id IN (
-			SELECT id FROM customer_schema.users WHERE email %s
+			SELECT id FROM customer_schema.users WHERE email_hash %s
 		)
 	`, notIn)
 	if _, err := tx.Exec(auditSQL, args...); err != nil {
@@ -101,11 +116,24 @@ func main() {
 		log.Fatalf("delete audit_logs error: %v", err)
 	}
 
-	usersSQL := fmt.Sprintf(`
-		DELETE FROM customer_schema.users
-		WHERE email %s
+	// Delete wallets for users NOT in the list
+	walletSQL := fmt.Sprintf(`
+		DELETE FROM customer_schema.wallets
+		WHERE user_id IN (
+			SELECT id FROM customer_schema.users WHERE email_hash %s
+		)
 	`, notIn)
-	res, err := tx.Exec(usersSQL, args...)
+	if _, err := tx.Exec(walletSQL, args...); err != nil {
+		_ = tx.Rollback()
+		log.Fatalf("delete wallets error: %v", err)
+	}
+
+	// Delete users NOT in the list
+	userSQL := fmt.Sprintf(`
+		DELETE FROM customer_schema.users
+		WHERE email_hash %s
+	`, notIn)
+	res, err := tx.Exec(userSQL, args...)
 	if err != nil {
 		_ = tx.Rollback()
 		log.Fatalf("delete users error: %v", err)

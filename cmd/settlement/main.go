@@ -5,6 +5,8 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"fmt"
 	"net/http"
 	"os"
@@ -15,6 +17,7 @@ import (
 	"github.com/gorilla/mux"
 	"github.com/jmoiron/sqlx"
 	_ "github.com/lib/pq"
+	"github.com/redis/go-redis/v9"
 
 	"kyd/internal/blockchain/ripple"
 	"kyd/internal/blockchain/stellar"
@@ -45,6 +48,20 @@ func main() {
 	db.SetMaxOpenConns(cfg.Database.MaxOpenConns)
 	db.SetMaxIdleConns(cfg.Database.MaxIdleConns)
 	db.SetConnMaxLifetime(cfg.Database.ConnMaxLifetime)
+
+	redisClient := redis.NewClient(&redis.Options{
+		Addr:     cfg.Redis.URL,
+		Password: cfg.Redis.Password,
+		DB:       cfg.Redis.DB,
+	})
+
+	if err := redisClient.Ping(context.Background()).Err(); err != nil {
+		log.Fatal("Failed to connect to Redis", map[string]interface{}{
+			"error": err.Error(),
+		})
+	}
+
+	log.Info("Redis connected", nil)
 
 	// Initialize blockchain connectors
 	stellarConnector, err := stellar.NewConnector(
@@ -93,17 +110,32 @@ func main() {
 	r.Use(middleware.CorrelationID)
 	r.Use(middleware.NewLoggingMiddleware(log).Log)
 	r.Use(middleware.BodyLimit(1 << 20))
+	r.Use(middleware.NewRateLimiter(redisClient, 60, time.Minute).WithAdaptive(5, 15*time.Minute).Limit)
+
+	// Auth Middleware
+	blacklist := middleware.NewRedisTokenBlacklist(redisClient)
+	authMW := middleware.NewAuthMiddleware(cfg.JWT.Secret, blacklist)
 
 	// Routes
 	r.HandleFunc("/health", healthCheck).Methods("GET")
 	r.HandleFunc("/ready", readyCheck(db)).Methods("GET")
 
 	// Admin routes for manual settlement triggers
-	r.HandleFunc("/api/v1/settlements/process", func(w http.ResponseWriter, r *http.Request) {
+	api := r.PathPrefix("/api/v1").Subrouter()
+	api.Use(authMW.Authenticate)
+	api.HandleFunc("/settlements/process", func(w http.ResponseWriter, r *http.Request) {
+		// Check for admin role
+		userType, ok := middleware.UserTypeFromContext(r.Context())
+		if !ok || userType != "admin" {
+			http.Error(w, "Forbidden", http.StatusForbidden)
+			return
+		}
+
 		if err := settlementService.ProcessPendingSettlements(r.Context()); err != nil {
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
+		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
 		w.Write([]byte(`{"status":"processing"}`))
 	}).Methods("POST")
@@ -117,11 +149,37 @@ func main() {
 		IdleTimeout:  cfg.Server.IdleTimeout,
 	}
 
+	// Configure mTLS if enabled
+	if cfg.Server.UseTLS {
+		// Load CA cert to verify clients (Gateway)
+		caCert, err := os.ReadFile(cfg.Server.CAFile)
+		if err != nil {
+			log.Fatal("Failed to read CA file", map[string]interface{}{"error": err.Error()})
+		}
+		caCertPool := x509.NewCertPool()
+		caCertPool.AppendCertsFromPEM(caCert)
+
+		srv.TLSConfig = &tls.Config{
+			ClientCAs:  caCertPool,
+			ClientAuth: tls.RequireAndVerifyClientCert,
+			MinVersion: tls.VersionTLS12,
+		}
+	}
+
 	go func() {
 		log.Info("Settlement service started", map[string]interface{}{
 			"address": srv.Addr,
+			"tls":     cfg.Server.UseTLS,
 		})
-		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+
+		var err error
+		if cfg.Server.UseTLS {
+			err = srv.ListenAndServeTLS(cfg.Server.CertFile, cfg.Server.KeyFile)
+		} else {
+			err = srv.ListenAndServe()
+		}
+
+		if err != nil && err != http.ErrServerClosed {
 			log.Fatal("Server failed to start", map[string]interface{}{
 				"error": err.Error(),
 			})

@@ -8,39 +8,32 @@ require (
 	github.com/golang-migrate/migrate/v4 v4.17.0
 	github.com/google/uuid v1.6.0
 	github.com/gorilla/mux v1.8.1
+	github.com/gorilla/websocket v1.5.3
 	github.com/jmoiron/sqlx v1.3.5
 	github.com/lib/pq v1.10.9
+	github.com/pquerna/otp v1.5.0
 	github.com/redis/go-redis/v9 v9.4.0
 	github.com/shopspring/decimal v1.3.1
-	github.com/stellar/go v0.0.0-20251126222017-0fb88165e991
+	github.com/stretchr/testify v1.10.0
 	golang.org/x/crypto v0.45.0
 )
 
 require (
+	github.com/boombuler/barcode v1.0.1-0.20190219062509-6c824513bacc // indirect
 	github.com/cespare/xxhash/v2 v2.3.0 // indirect
 	github.com/davecgh/go-spew v1.1.2-0.20180830191138-d8f796af33cc // indirect
 	github.com/dgryski/go-rendezvous v0.0.0-20200823014737-9f7001d12a5f // indirect
 	github.com/gabriel-vasile/mimetype v1.4.2 // indirect
-	github.com/go-chi/chi v4.1.2+incompatible // indirect
-	github.com/go-errors/errors v1.5.1 // indirect
 	github.com/go-playground/locales v0.14.1 // indirect
 	github.com/go-playground/universal-translator v0.18.1 // indirect
-	github.com/gorilla/schema v1.4.1 // indirect
 	github.com/hashicorp/errwrap v1.1.0 // indirect
 	github.com/hashicorp/go-multierror v1.1.1 // indirect
-	github.com/klauspost/compress v1.17.6 // indirect
 	github.com/kr/text v0.2.0 // indirect
 	github.com/leodido/go-urn v1.2.4 // indirect
-	github.com/manucorporat/sse v0.0.0-20160126180136-ee05b128a739 // indirect
-	github.com/pkg/errors v0.9.1 // indirect
+	github.com/mattn/go-sqlite3 v1.14.17 // indirect
 	github.com/pmezard/go-difflib v1.0.1-0.20181226105442-5d4384ee4fb2 // indirect
-	github.com/segmentio/go-loggly v0.5.1-0.20171222203950-eb91657e62b2 // indirect
-	github.com/sirupsen/logrus v1.9.3 // indirect
-	github.com/stellar/go-xdr v0.0.0-20231122183749-b53fb00bcac2 // indirect
 	github.com/stretchr/objx v0.5.2 // indirect
-	github.com/stretchr/testify v1.10.0 // indirect
 	go.uber.org/atomic v1.7.0 // indirect
-	golang.org/x/exp v0.0.0-20231006140011-7918f672742d // indirect
 	golang.org/x/net v0.47.0 // indirect
 	golang.org/x/sys v0.38.0 // indirect
 	golang.org/x/text v0.31.0 // indirect

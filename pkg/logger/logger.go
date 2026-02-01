@@ -5,9 +5,12 @@ package logger
 
 import (
 	"encoding/json"
+	"fmt"
 	"log"
 	"os"
 	"time"
+
+	"github.com/shopspring/decimal"
 )
 
 type Logger interface {
@@ -39,10 +42,29 @@ func (l *jsonLogger) log(level, message string, fields map[string]interface{}) {
 	}
 
 	for k, v := range fields {
-		entry[k] = v
+		switch val := v.(type) {
+		case decimal.Decimal:
+			entry[k] = val.String()
+		case *decimal.Decimal:
+			if val != nil {
+				entry[k] = val.String()
+			} else {
+				entry[k] = "0"
+			}
+		case fmt.Stringer:
+			entry[k] = val.String()
+		case error:
+			entry[k] = val.Error()
+		default:
+			entry[k] = v
+		}
 	}
 
-	jsonData, _ := json.Marshal(entry)
+	jsonData, err := json.Marshal(entry)
+	if err != nil {
+		l.logger.Printf("JSON marshal error: %v", err)
+		return
+	}
 	l.logger.Println(string(jsonData))
 }
 

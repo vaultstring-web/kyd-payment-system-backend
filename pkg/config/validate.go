@@ -22,6 +22,9 @@ func (c *Config) ValidateCore() error {
 	if strings.TrimSpace(c.JWT.Secret) == "" || c.JWT.Secret == "change-this-secret" {
 		missing = append(missing, "JWT_SECRET")
 	}
+	if c.Security.RequireSigning && strings.TrimSpace(c.Security.SigningSecret) == "" {
+		missing = append(missing, "SIGNING_SECRET")
+	}
 
 	if len(missing) > 0 {
 		return fmt.Errorf("missing required configuration: %s", strings.Join(missing, ", "))

@@ -15,10 +15,32 @@ type Config struct {
 	Database     DatabaseConfig
 	Redis        RedisConfig
 	JWT          JWTConfig
+	TOTP         TOTPConfig
 	Stellar      StellarConfig
 	Ripple       RippleConfig
 	Email        EmailConfig
 	Verification VerificationConfig
+	Security     SecurityConfig
+	Risk         RiskConfig
+	Compliance   ComplianceConfig
+}
+
+type RiskConfig struct {
+	EnableCircuitBreaker    bool
+	MaxDailyLimit           int64
+	HighValueThreshold      int64
+	MaxVelocityPerHour      int
+	MaxVelocityPerDay       int
+	SuspiciousLocationAlert string
+	GlobalSystemPause       bool
+	AdminApprovalThreshold  int64
+	RestrictedCountries     []string
+	EnableDisputeResolution bool
+}
+
+type ComplianceConfig struct {
+	EnableSanctionsCheck bool
+	EnableZKProof        bool
 }
 
 type ServerConfig struct {
@@ -27,10 +49,15 @@ type ServerConfig struct {
 	ReadTimeout  time.Duration
 	WriteTimeout time.Duration
 	IdleTimeout  time.Duration
+	UseTLS       bool
+	CertFile     string
+	KeyFile      string
+	CAFile       string
 }
 
 type DatabaseConfig struct {
 	URL             string
+	SSLMode         string
 	MaxOpenConns    int
 	MaxIdleConns    int
 	ConnMaxLifetime time.Duration
@@ -45,6 +72,12 @@ type RedisConfig struct {
 type JWTConfig struct {
 	Secret     string
 	Expiration time.Duration
+}
+
+type TOTPConfig struct {
+	Issuer string
+	Period int
+	Digits int
 }
 
 type StellarConfig struct {
@@ -73,7 +106,28 @@ type VerificationConfig struct {
 	TokenExpiration time.Duration
 }
 
+type SecurityConfig struct {
+	SigningSecret  string
+	RequireSigning bool
+	SignatureTTL   time.Duration
+}
+
 func Load() *Config {
+	dbURL := getEnv("DATABASE_URL", "postgres://postgres:postgres@localhost:5432/kyd_payment?sslmode=disable")
+	sslMode := getEnv("DB_SSL_MODE", "verify-full")
+
+	// Enforce SSL Mode if not present in URL, or override it
+	if !strings.Contains(dbURL, "sslmode=") {
+		if strings.Contains(dbURL, "?") {
+			dbURL += "&sslmode=" + sslMode
+		} else {
+			dbURL += "?sslmode=" + sslMode
+		}
+	} else {
+		// Optional: Force override to ensure security policy compliance
+		// dbURL = regexp.MustCompile(`sslmode=[^&]+`).ReplaceAllString(dbURL, "sslmode="+sslMode)
+	}
+
 	return &Config{
 		Server: ServerConfig{
 			Host:         getEnv("SERVER_HOST", "0.0.0.0"),
@@ -81,9 +135,14 @@ func Load() *Config {
 			ReadTimeout:  getDurationEnv("SERVER_READ_TIMEOUT", 10*time.Second),
 			WriteTimeout: getDurationEnv("SERVER_WRITE_TIMEOUT", 10*time.Second),
 			IdleTimeout:  getDurationEnv("SERVER_IDLE_TIMEOUT", 120*time.Second),
+			UseTLS:       getBoolEnv("SERVER_USE_TLS", false),
+			CertFile:     getEnv("SERVER_CERT_FILE", ""),
+			KeyFile:      getEnv("SERVER_KEY_FILE", ""),
+			CAFile:       getEnv("SERVER_CA_FILE", ""),
 		},
 		Database: DatabaseConfig{
-			URL:             getEnv("DATABASE_URL", ""),
+			URL:             dbURL,
+			SSLMode:         sslMode,
 			MaxOpenConns:    getIntEnv("DB_MAX_OPEN_CONNS", 25),
 			MaxIdleConns:    getIntEnv("DB_MAX_IDLE_CONNS", 25),
 			ConnMaxLifetime: getDurationEnv("DB_CONN_MAX_LIFETIME", 5*time.Minute),
@@ -96,6 +155,11 @@ func Load() *Config {
 		JWT: JWTConfig{
 			Secret:     getEnv("JWT_SECRET", "change-this-secret"),
 			Expiration: getDurationEnv("JWT_EXPIRATION", 15*time.Minute),
+		},
+		TOTP: TOTPConfig{
+			Issuer: getEnv("TOTP_ISSUER", "KYD"),
+			Period: getIntEnv("TOTP_PERIOD", 30),
+			Digits: getIntEnv("TOTP_DIGITS", 6),
 		},
 		Email: EmailConfig{
 			SMTPHost:     getEnv("SMTP_HOST", "smtp.gmail.com"),
@@ -118,6 +182,27 @@ func Load() *Config {
 			ServerURL:     getEnv("RIPPLE_SERVER_URL", "wss://s.altnet.rippletest.net:51233"),
 			IssuerAddress: getEnv("RIPPLE_ISSUER_ADDRESS", ""),
 			SecretKey:     getEnv("RIPPLE_SECRET_KEY", ""),
+		},
+		Security: SecurityConfig{
+			SigningSecret:  getEnv("SIGNING_SECRET", ""),
+			RequireSigning: getBoolEnv("SIGNING_REQUIRED", false),
+			SignatureTTL:   getDurationEnv("SIGNATURE_TTL", 5*time.Minute),
+		},
+		Risk: RiskConfig{
+			EnableCircuitBreaker:    getBoolEnv("RISK_ENABLE_CIRCUIT_BREAKER", true),
+			MaxDailyLimit:           int64(getIntEnv("RISK_MAX_DAILY_LIMIT", 100000000)),   // Default 100M atomic units
+			HighValueThreshold:      int64(getIntEnv("RISK_HIGH_VALUE_THRESHOLD", 100000)), // Default 100k atomic units
+			MaxVelocityPerHour:      getIntEnv("RISK_MAX_VELOCITY_PER_HOUR", 10),
+			MaxVelocityPerDay:       getIntEnv("RISK_MAX_VELOCITY_PER_DAY", 50),
+			SuspiciousLocationAlert: getEnv("RISK_SUSPICIOUS_LOCATION_ALERT", "North Korea"),
+			GlobalSystemPause:       getBoolEnv("RISK_GLOBAL_SYSTEM_PAUSE", false),
+			AdminApprovalThreshold:  int64(getIntEnv("RISK_ADMIN_APPROVAL_THRESHOLD", 500000)), // Default 500k atomic units
+			RestrictedCountries:     getStringSliceEnv("RISK_RESTRICTED_COUNTRIES", "KP,IR,SY,CU"),
+			EnableDisputeResolution: getBoolEnv("RISK_ENABLE_DISPUTE_RESOLUTION", true),
+		},
+		Compliance: ComplianceConfig{
+			EnableSanctionsCheck: getBoolEnv("COMPLIANCE_ENABLE_SANCTIONS", true),
+			EnableZKProof:        getBoolEnv("COMPLIANCE_ENABLE_ZK_PROOF", true),
 		},
 	}
 }
@@ -169,3 +254,19 @@ func getBoolEnv(key string, defaultValue bool) bool {
 	}
 	return defaultValue
 }
+
+func getStringSliceEnv(key string, defaultValue string) []string {
+	value := os.Getenv(key)
+	if value == "" {
+		value = defaultValue
+	}
+	if value == "" {
+		return []string{}
+	}
+	parts := strings.Split(value, ",")
+	for i := range parts {
+		parts[i] = strings.TrimSpace(parts[i])
+	}
+	return parts
+}
+																														

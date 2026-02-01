@@ -1,0 +1,3 @@
+ALTER TABLE customer_schema.users
+ADD COLUMN IF NOT EXISTS totp_secret VARCHAR(512),
+ADD COLUMN IF NOT EXISTS is_totp_enabled BOOLEAN DEFAULT FALSE;

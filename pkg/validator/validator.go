@@ -5,11 +5,13 @@ package validator
 
 import (
 	"fmt"
+	"html"
 	"reflect"
 	"regexp"
 	"strings"
 
 	"github.com/go-playground/validator/v10"
+	"github.com/shopspring/decimal"
 )
 
 type Validator struct {
@@ -43,7 +45,49 @@ func (v *Validator) Validate(i interface{}) error {
 	return nil
 }
 
+// ValidateStructured returns a map of field -> error message for frontend usage
+func (v *Validator) ValidateStructured(i interface{}) map[string]string {
+	errs := make(map[string]string)
+	if err := v.validate.Struct(i); err != nil {
+		if validationErrors, ok := err.(validator.ValidationErrors); ok {
+			for _, e := range validationErrors {
+				msg := fmt.Sprintf("failed validation on '%s'", e.Tag())
+				switch e.Tag() {
+				case "required":
+					msg = "This field is required"
+				case "email":
+					msg = "Invalid email address"
+				case "min":
+					msg = fmt.Sprintf("Must be at least %s characters", e.Param())
+				case "max":
+					msg = fmt.Sprintf("Must be at most %s characters", e.Param())
+				case "e164":
+					msg = "Invalid phone number format (E.164 required)"
+				case "phone_by_country":
+					msg = "Invalid phone number for the selected country"
+				}
+				errs[e.Field()] = msg
+			}
+		} else {
+			errs["_global"] = err.Error()
+		}
+	}
+	if len(errs) == 0 {
+		return nil
+	}
+	return errs
+}
+
 func (v *Validator) registerCustomValidations() {
+	// Register decimal.Decimal to be validated as float64 for gt/lt checks
+	v.validate.RegisterCustomTypeFunc(func(field reflect.Value) interface{} {
+		if val, ok := field.Interface().(decimal.Decimal); ok {
+			f, _ := val.Float64()
+			return f
+		}
+		return nil
+	}, decimal.Decimal{})
+
 	_ = v.validate.RegisterValidation("phone_by_country", func(fl validator.FieldLevel) bool {
 		phone := strings.TrimSpace(fl.Field().String())
 		// Basic E.164 format (+ then up to 15 digits)
@@ -71,4 +115,9 @@ func (v *Validator) registerCustomValidations() {
 		// If no country found, require E.164 only
 		return true
 	})
+}
+
+// Sanitize cleans string input to prevent XSS attacks
+func Sanitize(input string) string {
+	return html.EscapeString(strings.TrimSpace(input))
 }

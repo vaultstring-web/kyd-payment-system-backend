@@ -37,6 +37,7 @@ func (m *Mailer) Send(to, subject, body string) error {
 	if m.cfg.UseTLS {
 		conn, err := tls.Dial("tcp", addr, &tls.Config{
 			ServerName: m.cfg.Host,
+			MinVersion: tls.VersionTLS12,
 		})
 		if err != nil {
 			return err

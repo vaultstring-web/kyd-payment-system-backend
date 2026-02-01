@@ -47,6 +47,8 @@ type User struct {
 	RiskScore            decimal.Decimal `json:"risk_score" db:"risk_score"`
 	IsActive             bool            `json:"is_active" db:"is_active"`
 	EmailVerified        bool            `json:"email_verified" db:"email_verified"`
+	TOTPSecret           *string         `json:"-" db:"totp_secret"`
+	IsTOTPEnabled        bool            `json:"is_totp_enabled" db:"is_totp_enabled"`
 	LastLogin            *time.Time      `json:"last_login,omitempty" db:"last_login"`
 	FailedLoginAttempts  int             `json:"failed_login_attempts" db:"failed_login_attempts"`
 	LockedUntil          *time.Time      `json:"locked_until,omitempty" db:"locked_until"`
@@ -129,14 +131,18 @@ type Transaction struct {
 type TransactionStatus string
 
 const (
-	TransactionStatusPending    TransactionStatus = "pending"
-	TransactionStatusProcessing TransactionStatus = "processing"
-	TransactionStatusReserved   TransactionStatus = "reserved"
-	TransactionStatusSettling   TransactionStatus = "settling"
-	TransactionStatusCompleted  TransactionStatus = "completed"
-	TransactionStatusFailed     TransactionStatus = "failed"
-	TransactionStatusCancelled  TransactionStatus = "cancelled"
-	TransactionStatusRefunded   TransactionStatus = "refunded"
+	TransactionStatusPending           TransactionStatus = "pending"
+	TransactionStatusPendingApproval   TransactionStatus = "pending_approval"
+	TransactionStatusProcessing        TransactionStatus = "processing"
+	TransactionStatusReserved          TransactionStatus = "reserved"
+	TransactionStatusSettling          TransactionStatus = "settling"
+	TransactionStatusPendingSettlement TransactionStatus = "pending_settlement"
+	TransactionStatusCompleted         TransactionStatus = "completed"
+	TransactionStatusFailed            TransactionStatus = "failed"
+	TransactionStatusCancelled         TransactionStatus = "cancelled"
+	TransactionStatusRefunded          TransactionStatus = "refunded"
+	TransactionStatusDisputed          TransactionStatus = "disputed"
+	TransactionStatusReversed          TransactionStatus = "reversed"
 )
 
 type TransactionType string
@@ -206,6 +212,7 @@ type Settlement struct {
 	LastSubmittedAt    *time.Time        `json:"last_submitted_at,omitempty" db:"last_submitted_at"`
 	ConfirmedAt        *time.Time        `json:"confirmed_at,omitempty" db:"confirmed_at"`
 	CompletedAt        *time.Time        `json:"completed_at,omitempty" db:"completed_at"`
+	ReconciliationID   *uuid.UUID        `json:"reconciliation_id,omitempty" db:"reconciliation_id"`
 	Metadata           Metadata          `json:"metadata" db:"metadata"`
 	CreatedAt          time.Time         `json:"created_at" db:"created_at"`
 	UpdatedAt          time.Time         `json:"updated_at" db:"updated_at"`
@@ -233,17 +240,30 @@ const (
 
 // AuditLog represents a system audit log entry
 type AuditLog struct {
-	ID          uuid.UUID  `json:"id" db:"id"`
-	UserID      *uuid.UUID `json:"user_id,omitempty" db:"user_id"`
-	Action      string     `json:"action" db:"action"`
-	EntityType  *string    `json:"entity_type,omitempty" db:"entity_type"`
-	EntityID    *uuid.UUID `json:"entity_id,omitempty" db:"entity_id"`
-	OldValues   *Metadata  `json:"old_values,omitempty" db:"old_values"`
-	NewValues   *Metadata  `json:"new_values,omitempty" db:"new_values"`
-	IPAddress   *string    `json:"ip_address,omitempty" db:"ip_address"`
-	UserAgent   *string    `json:"user_agent,omitempty" db:"user_agent"`
-	RequestID   *string    `json:"request_id,omitempty" db:"request_id"`
-	StatusCode  *int       `json:"status_code,omitempty" db:"status_code"`
-	ErrorMessage *string   `json:"error_message,omitempty" db:"error_message"`
-	CreatedAt   time.Time  `json:"created_at" db:"created_at"`
+	ID           uuid.UUID  `json:"id" db:"id"`
+	UserID       *uuid.UUID `json:"user_id,omitempty" db:"user_id"`
+	Action       string     `json:"action" db:"action"`
+	EntityType   *string    `json:"entity_type,omitempty" db:"entity_type"`
+	EntityID     *uuid.UUID `json:"entity_id,omitempty" db:"entity_id"`
+	OldValues    *Metadata  `json:"old_values,omitempty" db:"old_values"`
+	NewValues    *Metadata  `json:"new_values,omitempty" db:"new_values"`
+	IPAddress    *string    `json:"ip_address,omitempty" db:"ip_address"`
+	UserAgent    *string    `json:"user_agent,omitempty" db:"user_agent"`
+	RequestID    *string    `json:"request_id,omitempty" db:"request_id"`
+	StatusCode   *int       `json:"status_code,omitempty" db:"status_code"`
+	ErrorMessage *string    `json:"error_message,omitempty" db:"error_message"`
+	CreatedAt    time.Time  `json:"created_at" db:"created_at"`
+}
+
+// TransactionLedger represents an immutable ledger entry for a transaction
+type TransactionLedger struct {
+	ID            uuid.UUID       `json:"id" db:"id"`
+	TransactionID uuid.UUID       `json:"transaction_id" db:"transaction_id"`
+	EventType     string          `json:"event_type" db:"event_type"`
+	Amount        decimal.Decimal `json:"amount" db:"amount"`
+	Currency      Currency        `json:"currency" db:"currency"`
+	Status        string          `json:"status" db:"status"`
+	PreviousHash  string          `json:"previous_hash" db:"previous_hash"`
+	Hash          string          `json:"hash" db:"hash"`
+	CreatedAt     time.Time       `json:"created_at" db:"created_at"`
 }

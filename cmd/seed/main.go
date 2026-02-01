@@ -1,203 +1,450 @@
-// Simple seeding tool to create/update a default user for auth login
-// Usage (env overrides):
-//
-//	SEED_EMAIL=john.doe@example.com SEED_PASSWORD=Password123
-//
-// Reads DATABASE_URL and other core config via kyd/pkg/config
 package main
 
 import (
 	"context"
+	"crypto/rand"
 	"fmt"
+	"math/big"
 	"os"
+	"strings"
 	"time"
+
+	"kyd/internal/domain"
+	"kyd/internal/repository/postgres"
+	"kyd/internal/security"
 
 	"github.com/google/uuid"
 	"github.com/jmoiron/sqlx"
 	_ "github.com/lib/pq"
 	"github.com/shopspring/decimal"
 	"golang.org/x/crypto/bcrypt"
-
-	"kyd/internal/repository/postgres"
-	"kyd/pkg/config"
-	"kyd/pkg/domain"
-	"kyd/pkg/logger"
 )
 
-func main() {
-	log := logger.New("seed-user")
-
-	cfg := config.Load()
-	if err := cfg.ValidateCore(); err != nil {
-		log.Fatal("Invalid configuration", map[string]interface{}{"error": err.Error()})
+func loadEnv() {
+	content, err := os.ReadFile(".env")
+	if err != nil {
+		// Try looking up one directory if we are in cmd/seed
+		content, err = os.ReadFile("../../.env")
+		if err != nil {
+			return // No .env found, rely on process env
+		}
 	}
 
-	email := getenv("SEED_EMAIL", "john.doe@example.com")
-	password := getenv("SEED_PASSWORD", "Password123")
-	phone := getenv("SEED_PHONE", "+265991234567")
-	first := getenv("SEED_FIRST", "John")
-	last := getenv("SEED_LAST", "Doe")
-	country := getenv("SEED_COUNTRY", "MW")
+	lines := strings.Split(string(content), "\n")
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		parts := strings.SplitN(line, "=", 2)
+		if len(parts) == 2 {
+			k := strings.TrimSpace(parts[0])
+			v := strings.TrimSpace(parts[1])
+			if os.Getenv(k) == "" {
+				os.Setenv(k, v)
+			}
+		}
+	}
+}
 
-	db, err := sqlx.Connect("postgres", cfg.Database.URL)
+func getenv(key, fallback string) string {
+	if v := os.Getenv(key); v != "" {
+		return v
+	}
+	return fallback
+}
+
+func main() {
+	loadEnv()
+
+	dbURL := getenv("DATABASE_URL", "postgres://kyd_user:kyd_password@localhost:5432/kyd_dev?sslmode=disable")
+	db, err := sqlx.Connect("postgres", dbURL)
 	if err != nil {
-		log.Fatal("Failed to connect to database", map[string]interface{}{"error": err.Error()})
+		fmt.Printf("Failed to connect to DB: %v\n", err)
+		os.Exit(1)
 	}
 	defer db.Close()
 
-	userRepo := postgres.NewUserRepository(db)
-	walletRepo := postgres.NewWalletRepository(db)
-	txRepo := postgres.NewTransactionRepository(db)
+	// Initialize security service
+	cryptoService, err := security.NewCryptoService()
+	if err != nil {
+		fmt.Printf("Failed to initialize crypto service: %v\n", err)
+		os.Exit(1)
+	}
+
+	repo := postgres.NewUserRepository(db, cryptoService)
+	ledgerRepo := postgres.NewLedgerRepository(db)
+
 	ctx := context.Background()
 
-	// Ensure John exists and has MWK wallet funded
-	johnID := ensureUser(ctx, userRepo, log, email, password, phone, first, last, country, domain.UserTypeIndividual, domain.KYCStatusVerified, 1)
-	resetLoginSecurity(ctx, userRepo, log, johnID)
-	ensureWallet(ctx, walletRepo, log, johnID, domain.MWK, decimal.NewFromInt(1_000_000))
-	purgeForeignCurrencyWallets(ctx, walletRepo, txRepo, log, johnID, domain.MWK)
-
-	// Ensure Wang exists and has CNY wallet funded
-	wEmail := getenv("SEED_WANG_EMAIL", "wang.wei@example.com")
-	wPass := getenv("SEED_WANG_PASSWORD", "Password123")
-	wPhone := getenv("SEED_WANG_PHONE", "+8613800138000")
-	wFirst := getenv("SEED_WANG_FIRST", "Wang")
-	wLast := getenv("SEED_WANG_LAST", "Wei")
-	wCountry := getenv("SEED_WANG_COUNTRY", "CN")
-	wangID := ensureUser(ctx, userRepo, log, wEmail, wPass, wPhone, wFirst, wLast, wCountry, domain.UserTypeMerchant, domain.KYCStatusPending, 0)
-	resetLoginSecurity(ctx, userRepo, log, wangID)
-	ensureWallet(ctx, walletRepo, log, wangID, domain.CNY, decimal.NewFromInt(10_000))
-	purgeForeignCurrencyWallets(ctx, walletRepo, txRepo, log, wangID, domain.CNY)
-
-	// Ensure Admin exists for dashboard access
-	aEmail := getenv("SEED_ADMIN_EMAIL", "admin@example.com")
-	aPass := getenv("SEED_ADMIN_PASSWORD", "Password123")
-	aPhone := getenv("SEED_ADMIN_PHONE", "+265880000000")
-	aFirst := getenv("SEED_ADMIN_FIRST", "System")
-	aLast := getenv("SEED_ADMIN_LAST", "Admin")
-	aCountry := getenv("SEED_ADMIN_COUNTRY", "MW")
-	adminID := ensureUser(ctx, userRepo, log, aEmail, aPass, aPhone, aFirst, aLast, aCountry, domain.UserTypeAdmin, domain.KYCStatusVerified, 3)
-	resetLoginSecurity(ctx, userRepo, log, adminID)
-
-	fmt.Println("OK: users and wallets seeded")
-}
-
-func getenv(key, def string) string {
-	v := os.Getenv(key)
-	if v == "" {
-		return def
+	// Verify Ledger Chain Integrity
+	valid, err := ledgerRepo.VerifyChain(ctx)
+	if err != nil {
+		fmt.Printf("⚠️  Ledger Chain Verification Error: %v\n", err)
+	} else if valid {
+		fmt.Println("✅ Ledger Chain Integrity Verified")
+	} else {
+		fmt.Println("❌ Ledger Chain Broken!")
 	}
-	return v
-}
 
-func ensureUser(ctx context.Context, repo *postgres.UserRepository, log logger.Logger, email, password, phone, first, last, country string, userType domain.UserType, kyc domain.KYCStatus, kycLevel int) uuid.UUID {
+	// 1. Create Individual User
+	email := "john.doe@example.com"
 	exists, err := repo.ExistsByEmail(ctx, email)
 	if err != nil {
-		log.Fatal("ExistsByEmail failed", map[string]interface{}{"error": err.Error()})
+		fmt.Printf("ExistsByEmail failed: %v\n", err)
+		os.Exit(1)
 	}
-	now := time.Now()
+
 	if !exists {
-		hash, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
+		hash, err := bcrypt.GenerateFromPassword([]byte("Password123!"), bcrypt.DefaultCost)
 		if err != nil {
-			log.Fatal("Hash failed", map[string]interface{}{"error": err.Error()})
+			fmt.Printf("Hash failed: %v\n", err)
+			os.Exit(1)
 		}
-		id := uuid.New()
+		now := time.Now()
 		u := &domain.User{
-			ID:           id,
+			ID:           uuid.New(),
 			Email:        email,
-			Phone:        phone,
+			Phone:        "+1234567890",
 			PasswordHash: string(hash),
-			FirstName:    first,
-			LastName:     last,
-			UserType:     userType,
-			KYCLevel:     kycLevel,
-			KYCStatus:    kyc,
-			CountryCode:  country,
+			FirstName:    "John",
+			LastName:     "Doe",
+			UserType:     domain.UserTypeIndividual,
+			KYCLevel:     1,
+			KYCStatus:    domain.KYCStatusVerified,
+			CountryCode:  "MW",
 			RiskScore:    decimal.Zero,
 			IsActive:     true,
 			CreatedAt:    now,
 			UpdatedAt:    now,
 		}
 		if err := repo.Create(ctx, u); err != nil {
-			log.Fatal("Create failed", map[string]interface{}{"error": err.Error()})
+			fmt.Printf("Create failed: %v\n", err)
+			os.Exit(1)
 		}
-		log.Info("User created", map[string]interface{}{"email": email})
-		return id
-	}
-	user, err := repo.FindByEmail(ctx, email)
-	if err != nil {
-		log.Fatal("FindByEmail failed", map[string]interface{}{"error": err.Error()})
-	}
-	hash, err := bcrypt.GenerateFromPassword([]byte(password), bcrypt.DefaultCost)
-	if err != nil {
-		log.Fatal("Hash failed", map[string]interface{}{"error": err.Error()})
-	}
-	user.PasswordHash = string(hash)
-	user.UpdatedAt = now
-	if err := repo.Update(ctx, user); err != nil {
-		log.Fatal("Update failed", map[string]interface{}{"error": err.Error()})
-	}
-	log.Info("User password updated", map[string]interface{}{"email": email})
-	return user.ID
-}
-
-func ensureWallet(ctx context.Context, repo *postgres.WalletRepository, log logger.Logger, userID uuid.UUID, currency domain.Currency, initialBalance decimal.Decimal) {
-	w, err := repo.FindByUserAndCurrency(ctx, userID, currency)
-	now := time.Now()
-	if err == nil && w != nil {
-		w.AvailableBalance = initialBalance
-		w.LedgerBalance = initialBalance
-		w.UpdatedAt = now
-		if err := repo.Update(ctx, w); err != nil {
-			log.Fatal("Update wallet failed", map[string]interface{}{"error": err.Error()})
+		// Mark email as verified
+		if err := repo.SetEmailVerified(ctx, u.ID); err != nil {
+			fmt.Printf("SetEmailVerified failed: %v\n", err)
 		}
-		log.Info("Wallet updated", map[string]interface{}{"user_id": userID, "currency": currency})
-		return
-	}
-	wallet := &domain.Wallet{
-		ID:               uuid.New(),
-		UserID:           userID,
-		Currency:         currency,
-		AvailableBalance: initialBalance,
-		LedgerBalance:    initialBalance,
-		ReservedBalance:  decimal.Zero,
-		Status:           domain.WalletStatusActive,
-		CreatedAt:        now,
-		UpdatedAt:        now,
-	}
-	if err := repo.Create(ctx, wallet); err != nil {
-		log.Fatal("Create wallet failed", map[string]interface{}{"error": err.Error()})
-	}
-	log.Info("Wallet created", map[string]interface{}{"user_id": userID, "currency": currency})
-}
-
-func purgeForeignCurrencyWallets(ctx context.Context, repo *postgres.WalletRepository, txRepo *postgres.TransactionRepository, log logger.Logger, userID uuid.UUID, allowed domain.Currency) {
-	wallets, err := repo.FindByUserID(ctx, userID)
-	if err != nil {
-		log.Error("Purge wallets: list failed", map[string]interface{}{"error": err.Error(), "user_id": userID})
-		return
-	}
-	for _, w := range wallets {
-		if w.Currency != allowed {
-			// Delete dependent rows to satisfy FK constraints
-			if err := repo.DeleteLedgerEntriesByWalletID(ctx, w.ID); err != nil {
-				log.Error("Purge wallets: delete ledger entries failed", map[string]interface{}{"error": err.Error(), "wallet_id": w.ID})
+		fmt.Println("OK: individual user created")
+	} else {
+		// Update password if exists
+		u, err := repo.FindByEmail(ctx, email)
+		if err == nil {
+			hash, _ := bcrypt.GenerateFromPassword([]byte("Password123!"), bcrypt.DefaultCost)
+			u.PasswordHash = string(hash)
+			if err := repo.Update(ctx, u); err != nil {
+				fmt.Printf("Update failed: %v\n", err)
+			} else {
+				fmt.Println("OK: individual user password updated")
 			}
-			if err := txRepo.DeleteByWalletID(ctx, w.ID); err != nil {
-				log.Error("Purge wallets: delete transactions failed", map[string]interface{}{"error": err.Error(), "wallet_id": w.ID})
+			// Ensure verified
+			repo.SetEmailVerified(ctx, u.ID)
+			// Ensure country code is MW for John
+			if u.CountryCode != "MW" {
+				if _, err := db.ExecContext(ctx, `UPDATE customer_schema.users SET country_code = 'MW', updated_at = NOW() WHERE id = $1`, u.ID); err != nil {
+					fmt.Printf("Failed to update John Doe country_code to MW: %v\n", err)
+				} else {
+					fmt.Println("OK: Updated John Doe country_code to MW")
+				}
 			}
-			if err := repo.Delete(ctx, w.ID); err != nil {
-				log.Error("Purge wallets: delete failed", map[string]interface{}{"error": err.Error(), "wallet_id": w.ID})
-				continue
-			}
-			log.Info("Deleted non-home-currency wallet", map[string]interface{}{"user_id": userID, "currency": w.Currency})
 		}
 	}
-}
 
-func resetLoginSecurity(ctx context.Context, repo *postgres.UserRepository, log logger.Logger, userID uuid.UUID) {
-	if err := repo.UpdateLoginSecurity(ctx, userID, 0, nil); err != nil {
-		log.Error("Reset login security failed", map[string]interface{}{"error": err.Error(), "user_id": userID})
-		return
+	// 2. Create Merchant User
+	merchantEmail := "merchant@example.com"
+	mExists, err := repo.ExistsByEmail(ctx, merchantEmail)
+	if err != nil {
+		fmt.Printf("Merchant ExistsByEmail failed: %v\n", err)
+		os.Exit(1)
 	}
-	log.Info("Reset login security", map[string]interface{}{"user_id": userID})
+
+	if !mExists {
+		hash, err := bcrypt.GenerateFromPassword([]byte("MerchantPass123!"), bcrypt.DefaultCost)
+		if err != nil {
+			fmt.Printf("Merchant Hash failed: %v\n", err)
+			os.Exit(1)
+		}
+		now := time.Now()
+		u := &domain.User{
+			ID:           uuid.New(),
+			Email:        merchantEmail,
+			Phone:        "+1987654321",
+			PasswordHash: string(hash),
+			FirstName:    "Merchant",
+			LastName:     "One",
+			UserType:     domain.UserTypeMerchant,
+			KYCLevel:     2,
+			KYCStatus:    domain.KYCStatusVerified,
+			CountryCode:  "US",
+			RiskScore:    decimal.Zero,
+			IsActive:     true,
+			CreatedAt:    now,
+			UpdatedAt:    now,
+		}
+		if err := repo.Create(ctx, u); err != nil {
+			fmt.Printf("Merchant Create failed: %v\n", err)
+			os.Exit(1)
+		}
+		if err := repo.SetEmailVerified(ctx, u.ID); err != nil {
+			fmt.Printf("Merchant SetEmailVerified failed: %v\n", err)
+		}
+		fmt.Println("OK: merchant user created")
+	}
+
+	// 3. Create Admin User
+	adminEmail := getenv("SEED_ADMIN_EMAIL", "admin@example.com")
+	adminPassword := getenv("SEED_ADMIN_PASSWORD", "AdminPassword123") // Removed ! to match user expectation
+
+	adminExists, err := repo.ExistsByEmail(ctx, adminEmail)
+	if err != nil {
+		fmt.Printf("Admin ExistsByEmail failed: %v\n", err)
+		os.Exit(1)
+	}
+
+	if !adminExists {
+		hash, err := bcrypt.GenerateFromPassword([]byte(adminPassword), bcrypt.DefaultCost)
+		if err != nil {
+			fmt.Printf("Admin Hash failed: %v\n", err)
+			os.Exit(1)
+		}
+		now := time.Now()
+		u := &domain.User{
+			ID:           uuid.New(),
+			Email:        adminEmail,
+			Phone:        "+265999999999",
+			PasswordHash: string(hash),
+			FirstName:    "System",
+			LastName:     "Admin",
+			UserType:     domain.UserTypeAdmin,
+			KYCLevel:     3,
+			KYCStatus:    domain.KYCStatusVerified,
+			CountryCode:  "MW",
+			RiskScore:    decimal.Zero,
+			IsActive:     true,
+			CreatedAt:    now,
+			UpdatedAt:    now,
+		}
+		if err := repo.Create(ctx, u); err != nil {
+			fmt.Printf("Admin Create failed: %v\n", err)
+			os.Exit(1)
+		}
+		if err := repo.SetEmailVerified(ctx, u.ID); err != nil {
+			fmt.Printf("Admin SetEmailVerified failed: %v\n", err)
+		}
+		fmt.Println("OK: admin user created")
+	} else {
+		// Update password if exists
+		u, err := repo.FindByEmail(ctx, adminEmail)
+		if err == nil {
+			hash, err := bcrypt.GenerateFromPassword([]byte(adminPassword), bcrypt.DefaultCost)
+			if err != nil {
+				fmt.Printf("Admin Hash failed: %v\n", err)
+				os.Exit(1)
+			}
+			u.PasswordHash = string(hash)
+			if err := repo.Update(ctx, u); err != nil {
+				fmt.Printf("Admin Update failed: %v\n", err)
+			} else {
+				fmt.Println("OK: admin user password updated")
+			}
+			repo.SetEmailVerified(ctx, u.ID)
+		}
+	}
+
+	// 4. Create Wang (CNY Receiver)
+	wangEmail := "wang.wei@example.com"
+	wExists, err := repo.ExistsByEmail(ctx, wangEmail)
+	if err != nil {
+		fmt.Printf("Wang ExistsByEmail failed: %v\n", err)
+		os.Exit(1)
+	}
+
+	if !wExists {
+		hash, err := bcrypt.GenerateFromPassword([]byte("Password123!"), bcrypt.DefaultCost)
+		if err != nil {
+			fmt.Printf("Wang Hash failed: %v\n", err)
+			os.Exit(1)
+		}
+		now := time.Now()
+		u := &domain.User{
+			ID:           uuid.New(),
+			Email:        wangEmail,
+			Phone:        "+8613800138000",
+			PasswordHash: string(hash),
+			FirstName:    "Wei",
+			LastName:     "Wang",
+			UserType:     domain.UserTypeIndividual,
+			KYCLevel:     2,
+			KYCStatus:    domain.KYCStatusVerified,
+			CountryCode:  "CN",
+			RiskScore:    decimal.Zero,
+			IsActive:     true,
+			CreatedAt:    now,
+			UpdatedAt:    now,
+		}
+		if err := repo.Create(ctx, u); err != nil {
+			fmt.Printf("Wang Create failed: %v\n", err)
+			os.Exit(1)
+		}
+		if err := repo.SetEmailVerified(ctx, u.ID); err != nil {
+			fmt.Printf("Wang SetEmailVerified failed: %v\n", err)
+		}
+		fmt.Println("OK: wang user created")
+	} else {
+		// Update password if exists
+		u, err := repo.FindByEmail(ctx, wangEmail)
+		if err == nil {
+			hash, _ := bcrypt.GenerateFromPassword([]byte("Password123!"), bcrypt.DefaultCost)
+			u.PasswordHash = string(hash)
+			repo.Update(ctx, u)
+			repo.SetEmailVerified(ctx, u.ID)
+		}
+	}
+
+	// 5. Create Luka (MWK Sender)
+	lukaEmail := "luka.banda@example.com"
+	lExists, err := repo.ExistsByEmail(ctx, lukaEmail)
+	if err != nil {
+		fmt.Printf("Luka ExistsByEmail failed: %v\n", err)
+		os.Exit(1)
+	}
+
+	if !lExists {
+		hash, err := bcrypt.GenerateFromPassword([]byte("Password123!"), bcrypt.DefaultCost)
+		if err != nil {
+			fmt.Printf("Luka Hash failed: %v\n", err)
+			os.Exit(1)
+		}
+		now := time.Now()
+		u := &domain.User{
+			ID:           uuid.New(),
+			Email:        lukaEmail,
+			Phone:        "+265991234567",
+			PasswordHash: string(hash),
+			FirstName:    "Luka",
+			LastName:     "Banda",
+			UserType:     domain.UserTypeIndividual,
+			KYCLevel:     2,
+			KYCStatus:    domain.KYCStatusVerified,
+			CountryCode:  "MW",
+			RiskScore:    decimal.Zero,
+			IsActive:     true,
+			CreatedAt:    now,
+			UpdatedAt:    now,
+		}
+		if err := repo.Create(ctx, u); err != nil {
+			fmt.Printf("Luka Create failed: %v\n", err)
+			os.Exit(1)
+		}
+		if err := repo.SetEmailVerified(ctx, u.ID); err != nil {
+			fmt.Printf("Luka SetEmailVerified failed: %v\n", err)
+		}
+		fmt.Println("OK: luka user created")
+	} else {
+		// Update password if exists
+		u, err := repo.FindByEmail(ctx, lukaEmail)
+		if err == nil {
+			hash, _ := bcrypt.GenerateFromPassword([]byte("Password123!"), bcrypt.DefaultCost)
+			u.PasswordHash = string(hash)
+			repo.Update(ctx, u)
+			repo.SetEmailVerified(ctx, u.ID)
+		}
+	}
+
+	// 6. Create Wallets
+	walletRepo := postgres.NewWalletRepository(db)
+
+	createWallet := func(userEmail string, currency domain.Currency, balance decimal.Decimal) {
+		u, err := repo.FindByEmail(ctx, userEmail)
+		if err != nil {
+			fmt.Printf("Failed to find user %s: %v\n", userEmail, err)
+			return
+		}
+
+		wallets, err := walletRepo.FindByUserID(ctx, u.ID)
+		if err != nil {
+			fmt.Printf("Failed to find wallets for %s: %v\n", userEmail, err)
+			return
+		}
+
+		// Check if wallet for currency exists
+		var exists bool
+		for _, w := range wallets {
+			if w.Currency == currency {
+				exists = true
+				break
+			}
+		}
+
+		if !exists {
+			// Generate 16-digit wallet number
+			n, err := rand.Int(rand.Reader, big.NewInt(10000000000000000))
+			if err != nil {
+				fmt.Printf("Failed to generate wallet number: %v\n", err)
+				return
+			}
+			walletNum := fmt.Sprintf("%016d", n)
+
+			now := time.Now()
+			w := &domain.Wallet{
+				ID:               uuid.New(),
+				UserID:           u.ID,
+				WalletAddress:    &walletNum,
+				Currency:         currency,
+				AvailableBalance: balance,
+				LedgerBalance:    balance,
+				ReservedBalance:  decimal.Zero,
+				Status:           domain.WalletStatusActive,
+				CreatedAt:        now,
+				UpdatedAt:        now,
+			}
+			if err := walletRepo.Create(ctx, w); err != nil {
+				fmt.Printf("Failed to create %s wallet for %s: %v\n", currency, userEmail, err)
+			} else {
+				fmt.Printf("OK: Created %s wallet for %s with balance %s\n", currency, userEmail, balance)
+			}
+		} else {
+			fmt.Printf("Info: %s wallet for %s already exists\n", currency, userEmail)
+		}
+	}
+
+	// Fix for John Doe: Convert USD wallet to MWK if it exists
+	jd, err := repo.FindByEmail(ctx, "john.doe@example.com")
+	if err == nil {
+		// Check if MWK wallet already exists
+		_, errMWK := walletRepo.FindByUserAndCurrency(ctx, jd.ID, domain.MWK)
+		if errMWK != nil { // MWK not found
+			// Check for USD wallet
+			usdWallet, errUSD := walletRepo.FindByUserAndCurrency(ctx, jd.ID, domain.USD)
+			if errUSD == nil {
+				fmt.Println("Converting USD wallet to MWK for John Doe...")
+				// Manually update currency since Repository doesn't allow it
+				_, err := db.ExecContext(ctx, `
+					UPDATE customer_schema.wallets 
+					SET currency = 'MWK', 
+						available_balance = 500000.00, 
+						ledger_balance = 500000.00 
+					WHERE id = $1`, usdWallet.ID)
+
+				if err != nil {
+					fmt.Printf("Error converting wallet: %v\n", err)
+				} else {
+					fmt.Println("OK: Wallet converted to MWK")
+				}
+			}
+		}
+		// Print wallet currencies after conversion
+		ws, err := walletRepo.FindByUserID(ctx, jd.ID)
+		if err == nil {
+			for _, w := range ws {
+				fmt.Printf("John Doe wallet currency: %s\n", w.Currency)
+			}
+		}
+	}
+
+	// createWallet("john.doe@example.com", domain.USD, decimal.NewFromFloat(40500.80))
+	createWallet("john.doe@example.com", domain.MWK, decimal.NewFromFloat(500000.00)) // Changed to MWK as per user request
+	createWallet("wang.wei@example.com", domain.CNY, decimal.NewFromFloat(100000.00))
+	createWallet("luka.banda@example.com", domain.MWK, decimal.NewFromFloat(1500000.00))
 }

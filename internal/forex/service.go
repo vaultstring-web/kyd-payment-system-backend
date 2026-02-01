@@ -63,7 +63,7 @@ func (s *Service) GetRate(ctx context.Context, from, to domain.Currency) (*domai
 		}, nil
 	}
 
-	// Try cache first
+	// Try cache first (In-Memory)
 	key := fmt.Sprintf("%s-%s", from, to)
 	s.mu.RLock()
 	if rate, ok := s.rateCache[key]; ok {
@@ -73,6 +73,19 @@ func (s *Service) GetRate(ctx context.Context, from, to domain.Currency) (*domai
 		}
 	}
 	s.mu.RUnlock()
+
+	// Try Distributed Cache (Redis)
+	if s.cache != nil {
+		if rate, err := s.cache.Get(key); err == nil {
+			if rate.ValidTo == nil || rate.ValidTo.After(time.Now()) {
+				// Populate in-memory cache for next time
+				s.mu.Lock()
+				s.rateCache[key] = rate
+				s.mu.Unlock()
+				return rate, nil
+			}
+		}
+	}
 
 	// Try database
 	rate, err := s.repo.GetLatestRate(ctx, from, to)
@@ -91,6 +104,8 @@ func (s *Service) fetchAndStoreRate(ctx context.Context, from, to domain.Currenc
 		if err != nil {
 			s.logger.Warn("Provider failed", map[string]interface{}{
 				"provider": provider.Name(),
+				"from":     from,
+				"to":       to,
 				"error":    err.Error(),
 			})
 			continue
@@ -117,6 +132,11 @@ func (s *Service) fetchAndStoreRate(ctx context.Context, from, to domain.Currenc
 	}
 
 	return nil, errors.ErrRateNotAvailable
+}
+
+// GetHistory retrieves historical exchange rates for a currency pair.
+func (s *Service) GetHistory(ctx context.Context, from, to domain.Currency, limit int) ([]*domain.ExchangeRate, error) {
+	return s.repo.GetRateHistory(ctx, from, to, limit)
 }
 
 func (s *Service) updateCache(key string, rate *domain.ExchangeRate) {

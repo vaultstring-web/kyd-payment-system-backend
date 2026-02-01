@@ -7,6 +7,8 @@ import (
 	"net/http"
 	"time"
 
+	kyderrors "kyd/pkg/errors"
+
 	"github.com/redis/go-redis/v9"
 )
 
@@ -40,29 +42,57 @@ func (m *IdempotencyMiddleware) Require(next http.Handler) http.Handler {
 			return
 		}
 
+		fmt.Printf("[DEBUG-FIX] Idempotency Middleware - Key: %s, Method: %s, URL: %s, RemoteAddr: %s, RequestID: %s\n", key, r.Method, r.URL.String(), r.RemoteAddr, r.Header.Get("X-Request-ID"))
+
 		dataKey := fmt.Sprintf("idempotency:data:%s:%s", r.Method, key)
 		lockKey := fmt.Sprintf("idempotency:lock:%s:%s", r.Method, key)
 
 		// Fast path: cached response exists
 		if handled := m.replayCached(w, r, dataKey); handled {
+			fmt.Printf("[DEBUG-FIX] Idempotency Hit (Cache) - Key: %s\n", key)
 			return
 		}
 
 		// Acquire lock to process the first request
-		ok, err := m.cache.SetNX(r.Context(), lockKey, "1", m.ttl).Result()
+		requestID := r.Header.Get("X-Request-ID")
+		if requestID == "" {
+			requestID = "unknown"
+		}
+
+		ok, err := m.cache.SetNX(r.Context(), lockKey, requestID, m.ttl).Result()
 		if err != nil {
+			fmt.Printf("[DEBUG-FIX] Idempotency Redis Error - Key: %s, Error: %v\n", key, err)
 			http.Error(w, "Internal server error", http.StatusInternalServerError)
 			return
 		}
 
 		if !ok {
-			// Another request in-flight; check if cached now, otherwise signal conflict
-			if handled := m.replayCached(w, r, dataKey); handled {
+			// Check for re-entrancy (same request ID) to avoid deadlock
+			val, err := m.cache.Get(r.Context(), lockKey).Result()
+			if err == nil && val == requestID {
+				fmt.Printf("[DEBUG-FIX] Idempotency Re-entrant Call Detected - Key: %s, RequestID: %s. Proceeding without lock.\n", key, requestID)
+				next.ServeHTTP(w, r)
 				return
 			}
-			http.Error(w, "Duplicate request", http.StatusConflict)
+			fmt.Printf("[DEBUG-FIX] Idempotency Re-entrancy Check Failed - Key: %s, RequestID: %s, Val: %s, Err: %v\n", key, requestID, val, err)
+
+			fmt.Printf("[DEBUG-FIX] Idempotency Lock Conflict - Key: %s. Waiting...\n", key)
+			// Another request in-flight; wait for it to complete (up to 5s)
+			// This prevents "Duplicate request" errors on double-clicks and slow processing
+			for i := 0; i < 50; i++ {
+				time.Sleep(100 * time.Millisecond)
+				if handled := m.replayCached(w, r, dataKey); handled {
+					fmt.Printf("[DEBUG-FIX] Idempotency Resolved after Wait - Key: %s\n", key)
+					return
+				}
+			}
+
+			fmt.Printf("[DEBUG-FIX] Idempotency Timeout/Conflict - Key: %s\n", key)
+			// If still not ready, THEN return conflict or processing
+			http.Error(w, kyderrors.ErrDuplicateRequest.Error(), http.StatusConflict)
 			return
 		}
+		fmt.Printf("[DEBUG-FIX] Idempotency Lock Acquired - Key: %s\n", key)
 		defer m.cache.Del(r.Context(), lockKey)
 
 		// Capture response

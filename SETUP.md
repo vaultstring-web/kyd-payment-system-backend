@@ -1,108 +1,94 @@
 # KYD Payment System – Setup Guide
 
-This guide helps teammates clone, configure, and run the backend on their machines or in Docker.
+This guide helps teammates clone, configure, and run the backend.
+**Recommended:** Use Docker for a consistent, "bank-grade" environment.
 
 ## Prerequisites
-- Go `>= 1.24.11`
-- Docker + Docker Compose (for local services)
-- PostgreSQL 15+
-- Redis 7+
-- (Optional) Node.js 20+ if you build the Next.js web client later
+- **Docker Desktop** (includes Docker Compose)
+- (Optional) **Go 1.21+** (only if you want to run scripts locally without Docker)
+- (Optional) **Node.js 20+** (for frontend development)
 
-## Clone and dependencies
-```bash
-git clone <your-repo-url>
-cd kyd-payment-system
-go mod download
-```
+## Quick Start (Docker)
 
-## Environment variables
-Set these before running any service (example values shown):
-```
-SERVER_HOST=0.0.0.0
-SERVER_PORT=3000           # per service; see README or scripts
-DATABASE_URL=postgres://kyd_user:kyd_password@localhost:5432/kyd_dev?sslmode=disable
-REDIS_URL=localhost:6379
-JWT_SECRET=replace-with-strong-secret
+1. **Clone the repository**
+   ```bash
+   git clone <repo-url>
+   cd kyd-payment-system
+   ```
 
-# Email (Gmail SMTP)
-SMTP_HOST=smtp.gmail.com
-SMTP_PORT=587
-SMTP_USERNAME=your-gmail@example.com
-SMTP_PASSWORD=your-app-password
-SMTP_FROM=your-gmail@example.com
-SMTP_USE_TLS=true
-VERIFICATION_BASE_URL=http://localhost:9000/api/v1/auth/verify
-EMAIL_VERIFICATION_EXPIRATION=24h
+2. **Configure Environment**
+   Copy `env.example` to `.env` (optional, as `docker-compose.yml` has defaults):
+   ```bash
+   cp env.example .env
+   ```
+   *Note: For local dev, `DB_SSL_MODE=disable` is used. For production, set to `verify-full`.*
 
-# Stellar
-STELLAR_NETWORK_URL=https://horizon-testnet.stellar.org
-STELLAR_ISSUER_ACCOUNT=GA...
-STELLAR_SECRET_KEY=SA...
+3. **Run Everything**
+   ```bash
+   docker-compose up --build
+   ```
+   This starts:
+   - PostgreSQL (Database)
+   - Redis (Cache)
+   - API Gateway (:9000)
+   - Microservices (Auth, Payment, Wallet, Forex, Settlement)
+   - Frontend (if included in compose)
 
-# Ripple
-RIPPLE_SERVER_URL=wss://s.altnet.rippletest.net:51233
-RIPPLE_ISSUER_ADDRESS=r...
-RIPPLE_SECRET_KEY=s...
-```
+   *Migrations run automatically on startup.*
 
-You can start from `env.example` (copy to `.env` if you use a dotenv loader).
+4. **Verify Deployment**
+   Wait for logs to settle ("database system is ready to accept connections"), then run:
+   ```powershell
+   ./scripts/verify-fixes.ps1
+   ```
+   This script:
+   - Registers/Logins users
+   - Checks wallet balances
+   - Performs a test transaction
+   - Verifies security settings
 
-## Database migrations
-Run using the built-in migration command. This applies all migrations sequentially:
-```bash
-# Windows PowerShell
-$env:DATABASE_URL="postgres://kyd_user:kyd_password@localhost:5432/kyd_dev?sslmode=disable"
-go run .\cmd\migrate\main.go up
-```
+## Manual Setup (Not Recommended)
 
-Then seed test data:
-```bash
-go run .\cmd\seed\main.go
-```
+If you must run services locally without Docker:
 
-### Email verification (local)
-- Use a Gmail App Password for `SMTP_PASSWORD`.
-- After registering a user (`POST /api/v1/auth/register`), a verification email is sent automatically.
-- You can resend using `POST /api/v1/auth/send-verification` with `{ "email": "<your-gmail@example.com>" }`.
-- Verification link uses `VERIFICATION_BASE_URL` and redirects through the gateway.
+1.  **Start Dependencies**:
+    ```bash
+    docker run -d -p 5432:5432 -e POSTGRES_PASSWORD=kyd_password postgres:15
+    docker run -d -p 6379:6379 redis:7
+    ```
 
-## Running locally (Docker Compose)
-```bash
-docker compose up -d postgres redis
-```
-Then start services (choose one):
-- **PowerShell supervisor** (recommended):
-  ```powershell
-  powershell -ExecutionPolicy Bypass -File .\scripts\start-backend.ps1
-  ```
-- **Manual** (per service):
-  ```powershell
-  $env:SERVER_PORT="3000"; go run .\cmd\auth
-  $env:SERVER_PORT="3001"; go run .\cmd\payment
-  $env:SERVER_PORT="3002"; go run .\cmd\forex
-  $env:SERVER_PORT="3003"; go run .\cmd\wallet
-  $env:SERVER_PORT="9000"; go run .\cmd\gateway
-  ```
+2.  **Run Migrations**:
+    ```bash
+    go run cmd/migrate/main.go up
+    ```
 
-Health checks:
-- `GET http://localhost:3000/health` (auth)
-- `GET http://localhost:3001/health` (payment)
-- `GET http://localhost:3002/health` (forex)
-- `GET http://localhost:3003/health` (wallet)
-- API Gateway (if used): `http://localhost:9000`
+3.  **Seed Data**:
+    ```bash
+    go run cmd/seed/main.go
+    ```
 
-## Verify backend
-Quick health and basic flow test:
-```powershell
-powershell -ExecutionPolicy Bypass -File .\test-backend.ps1
-```
+4.  **Run Services** (in separate terminals):
+    ```bash
+    go run cmd/auth/main.go
+    go run cmd/payment/main.go
+    # ... etc
+    ```
 
-If all health checks pass and registration succeeds, your local setup is good to go.
+## Security Notes
 
-## API docs
-- Postman collection: `docs/KYD_API.postman_collection.json`
+- **PII Encryption**: Data in DB is encrypted. If you inspect the DB directly, you'll see ciphertext for emails/phones.
+- **SSL/TLS**: Enforced in production. Local dev uses `disable` mode for convenience.
+- **Passwords**: Must include Upper, Lower, Number, Special Char.
 
-## Notes
-- Binaries and logs are git-ignored (`.gitignore`). If you see `*.exe` in `build/`, they’re generated artifacts; delete locally as needed.
-- Dependencies are fetched from upstream (no `vendor/`).
+## Risk Engine Configuration
+
+The Payment Service includes a configurable Risk Engine. You can tune these in `.env` or `docker-compose.yml`:
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `RISK_ENABLE_CIRCUIT_BREAKER` | `true` | Global kill-switch for payments |
+| `RISK_MAX_DAILY_LIMIT` | `100000000` | Max daily volume per user (Atomic Units) |
+| `RISK_HIGH_VALUE_THRESHOLD` | `100000` | Threshold for velocity checks (Atomic Units) |
+| `RISK_ADMIN_APPROVAL_THRESHOLD` | `500000` | Transactions above this amount require admin approval |
+| `RISK_RESTRICTED_COUNTRIES` | `KP,IR,SY,CU` | Comma-separated list of blocked country codes (ISO 2-letter) |
+| `RISK_ENABLE_DISPUTE_RESOLUTION` | `true` | Enables dispute/reversal flows |

@@ -28,9 +28,9 @@ func (r *SettlementRepository) Create(ctx context.Context, settlement *domain.Se
 			id, batch_reference, network, transaction_hash, source_account,
 			destination_account, total_amount, currency, fee_amount, fee_currency,
 			status, submission_count, last_submitted_at, confirmed_at, completed_at,
-			metadata, created_at, updated_at
+			reconciliation_id, metadata, created_at, updated_at
 		) VALUES (
-			$1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18
+			$1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19
 		)
 	`
 
@@ -39,8 +39,8 @@ func (r *SettlementRepository) Create(ctx context.Context, settlement *domain.Se
 		settlement.TransactionHash, settlement.SourceAccount, settlement.DestinationAccount,
 		settlement.TotalAmount, settlement.Currency, settlement.FeeAmount, settlement.FeeCurrency,
 		settlement.Status, settlement.SubmissionCount, settlement.LastSubmittedAt,
-		settlement.ConfirmedAt, settlement.CompletedAt, settlement.Metadata,
-		settlement.CreatedAt, settlement.UpdatedAt,
+		settlement.ConfirmedAt, settlement.CompletedAt, settlement.ReconciliationID,
+		settlement.Metadata, settlement.CreatedAt, settlement.UpdatedAt,
 	)
 
 	return errors.Wrap(err, "failed to create settlement")
@@ -51,14 +51,15 @@ func (r *SettlementRepository) Update(ctx context.Context, settlement *domain.Se
 		UPDATE customer_schema.settlements SET
 			transaction_hash = $1, status = $2, submission_count = $3,
 			last_submitted_at = $4, confirmed_at = $5, completed_at = $6,
-			metadata = $7, updated_at = $8
-		WHERE id = $9
+			reconciliation_id = $7, metadata = $8, updated_at = $9
+		WHERE id = $10
 	`
 
 	_, err := r.db.ExecContext(ctx, query,
 		settlement.TransactionHash, settlement.Status, settlement.SubmissionCount,
 		settlement.LastSubmittedAt, settlement.ConfirmedAt, settlement.CompletedAt,
-		settlement.Metadata, settlement.UpdatedAt, settlement.ID,
+		settlement.ReconciliationID, settlement.Metadata, settlement.UpdatedAt,
+		settlement.ID,
 	)
 
 	return errors.Wrap(err, "failed to update settlement")
@@ -86,7 +87,7 @@ func (r *SettlementRepository) FindAll(ctx context.Context, limit, offset int) (
 			id, batch_reference, network, transaction_hash, source_account,
 			destination_account, total_amount, currency, fee_amount, fee_currency,
 			status, submission_count, last_submitted_at, confirmed_at, completed_at,
-			metadata, created_at, updated_at
+			reconciliation_id, metadata, created_at, updated_at
 		FROM customer_schema.settlements
 		ORDER BY created_at DESC
 		LIMIT $1 OFFSET $2
@@ -106,4 +107,22 @@ func (r *SettlementRepository) CountAll(ctx context.Context) (int, error) {
 		return 0, errors.Wrap(err, "failed to count settlements")
 	}
 	return total, nil
+}
+
+func (r *SettlementRepository) FindSubmitted(ctx context.Context) ([]*domain.Settlement, error) {
+	var settlements []*domain.Settlement
+	query := `
+		SELECT 
+			id, batch_reference, network, transaction_hash, source_account,
+			destination_account, total_amount, currency, fee_amount, fee_currency,
+			status, submission_count, last_submitted_at, confirmed_at, completed_at,
+			metadata, created_at, updated_at
+		FROM customer_schema.settlements
+		WHERE status = $1
+	`
+	err := r.db.SelectContext(ctx, &settlements, query, domain.SettlementStatusSubmitted)
+	if err != nil {
+		return nil, errors.Wrap(err, "failed to find submitted settlements")
+	}
+	return settlements, nil
 }

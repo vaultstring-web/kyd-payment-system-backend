@@ -52,6 +52,12 @@ type SettlementStatus = pkg.SettlementStatus
 // AuditLog represents a system audit log entry.
 type AuditLog = pkg.AuditLog
 
+// UserDevice represents a user's trusted device.
+type UserDevice = pkg.UserDevice
+
+// TransactionLedger represents an immutable ledger entry.
+type TransactionLedger = pkg.TransactionLedger
+
 // Re-exported currency codes.
 const (
 	MWK = pkg.MWK
@@ -85,14 +91,18 @@ const (
 
 // Re-exported transaction statuses.
 const (
-	TransactionStatusPending    = pkg.TransactionStatusPending
-	TransactionStatusProcessing = pkg.TransactionStatusProcessing
-	TransactionStatusReserved   = pkg.TransactionStatusReserved
-	TransactionStatusSettling   = pkg.TransactionStatusSettling
-	TransactionStatusCompleted  = pkg.TransactionStatusCompleted
-	TransactionStatusFailed     = pkg.TransactionStatusFailed
-	TransactionStatusCancelled  = pkg.TransactionStatusCancelled
-	TransactionStatusRefunded   = pkg.TransactionStatusRefunded
+	TransactionStatusPending           = pkg.TransactionStatusPending
+	TransactionStatusPendingApproval   = pkg.TransactionStatusPendingApproval
+	TransactionStatusProcessing        = pkg.TransactionStatusProcessing
+	TransactionStatusReserved          = pkg.TransactionStatusReserved
+	TransactionStatusSettling          = pkg.TransactionStatusSettling
+	TransactionStatusPendingSettlement = pkg.TransactionStatusPendingSettlement
+	TransactionStatusCompleted         = pkg.TransactionStatusCompleted
+	TransactionStatusFailed            = pkg.TransactionStatusFailed
+	TransactionStatusDisputed          = pkg.TransactionStatusDisputed
+	TransactionStatusReversed          = pkg.TransactionStatusReversed
+	TransactionStatusCancelled         = pkg.TransactionStatusCancelled
+	TransactionStatusRefunded          = pkg.TransactionStatusRefunded
 )
 
 // Re-exported transaction types.

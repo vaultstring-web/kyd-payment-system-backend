@@ -5,6 +5,8 @@ package main
 
 import (
 	"context"
+	"crypto/tls"
+	"crypto/x509"
 	"fmt"
 	"net/http"
 	"os"
@@ -118,11 +120,36 @@ func main() {
 		IdleTimeout:  cfg.Server.IdleTimeout,
 	}
 
+	if cfg.Server.UseTLS {
+		// Load CA cert for client auth
+		caCert, err := os.ReadFile(cfg.Server.CAFile)
+		if err != nil {
+			log.Fatal("Failed to read CA file", map[string]interface{}{"error": err.Error()})
+		}
+		caCertPool := x509.NewCertPool()
+		caCertPool.AppendCertsFromPEM(caCert)
+
+		srv.TLSConfig = &tls.Config{
+			ClientCAs:  caCertPool,
+			ClientAuth: tls.RequireAndVerifyClientCert,
+			MinVersion: tls.VersionTLS12,
+		}
+	}
+
 	go func() {
 		log.Info("Forex service started", map[string]interface{}{
 			"address": srv.Addr,
+			"tls":     cfg.Server.UseTLS,
 		})
-		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+
+		var err error
+		if cfg.Server.UseTLS {
+			err = srv.ListenAndServeTLS(cfg.Server.CertFile, cfg.Server.KeyFile)
+		} else {
+			err = srv.ListenAndServe()
+		}
+
+		if err != nil && err != http.ErrServerClosed {
 			log.Fatal("Server failed to start", map[string]interface{}{
 				"error": err.Error(),
 			})

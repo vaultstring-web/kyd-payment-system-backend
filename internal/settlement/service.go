@@ -8,18 +8,20 @@ import (
 	"fmt"
 	"time"
 
-	"github.com/google/uuid"
-	"github.com/shopspring/decimal"
 	"kyd/internal/domain"
 	"kyd/pkg/logger"
+
+	"github.com/google/uuid"
+	"github.com/shopspring/decimal"
 )
 
 type Service struct {
-	repo              Repository
-	txRepo            TransactionRepository
-	stellarConnector  BlockchainConnector
-	rippleConnector   BlockchainConnector
-	logger            logger.Logger
+	repo             Repository
+	txRepo           TransactionRepository
+	stellarConnector BlockchainConnector
+	rippleConnector  BlockchainConnector
+	logger           logger.Logger
+	monitorInterval  time.Duration
 }
 
 func NewService(
@@ -34,6 +36,7 @@ func NewService(
 		stellarConnector: stellar,
 		rippleConnector:  ripple,
 		logger:           log,
+		monitorInterval:  2 * time.Second,
 	}
 
 	// Start settlement worker
@@ -44,17 +47,91 @@ func NewService(
 
 // startSettlementWorker runs periodic settlement batching
 func (s *Service) startSettlementWorker() {
+	// Initial recovery of settlements that were interrupted
+	ctx := context.Background()
+	if err := s.RecoverPendingSettlements(ctx); err != nil {
+		s.logger.Error("Failed to recover pending settlements", map[string]interface{}{
+			"error": err.Error(),
+		})
+	}
+
 	ticker := time.NewTicker(1 * time.Hour)
 	defer ticker.Stop()
 
 	for range ticker.C {
-		ctx := context.Background()
 		if err := s.ProcessPendingSettlements(ctx); err != nil {
 			s.logger.Error("Settlement worker error", map[string]interface{}{
 				"error": err.Error(),
 			})
 		}
+
+		if err := s.RecoverPendingSettlements(ctx); err != nil {
+			s.logger.Error("Recovery worker error", map[string]interface{}{
+				"error": err.Error(),
+			})
+		}
+
+		if err := s.CleanupStuckTransactions(ctx); err != nil {
+			s.logger.Error("Cleanup worker error", map[string]interface{}{
+				"error": err.Error(),
+			})
+		}
 	}
+}
+
+// RecoverPendingSettlements finds settlements in Submitted state and resumes monitoring
+func (s *Service) RecoverPendingSettlements(ctx context.Context) error {
+	submitted, err := s.repo.FindSubmitted(ctx)
+	if err != nil {
+		return err
+	}
+
+	for _, settlement := range submitted {
+		if settlement.TransactionHash != nil {
+			go s.monitorSettlement(settlement.ID, *settlement.TransactionHash)
+			s.logger.Info("Resumed monitoring for settlement", map[string]interface{}{
+				"settlement_id": settlement.ID,
+				"tx_hash":       *settlement.TransactionHash,
+			})
+		}
+	}
+	return nil
+}
+
+// CleanupStuckTransactions finds and fails transactions stuck in pending state
+func (s *Service) CleanupStuckTransactions(ctx context.Context) error {
+	// Find transactions pending for more than 1 hour
+	stuckTxs, err := s.txRepo.FindStuckPending(ctx, 1*time.Hour, 100)
+	if err != nil {
+		return err
+	}
+
+	if len(stuckTxs) > 0 {
+		s.logger.Info("Found stuck transactions", map[string]interface{}{
+			"count": len(stuckTxs),
+		})
+	}
+
+	for _, tx := range stuckTxs {
+		tx.Status = domain.TransactionStatusFailed
+		reason := "Timeout: Transaction stuck in pending state"
+		tx.StatusReason = &reason
+		now := time.Now()
+		tx.CompletedAt = &now
+		tx.UpdatedAt = now
+
+		if err := s.txRepo.Update(ctx, tx); err != nil {
+			s.logger.Error("Failed to mark stuck transaction as failed", map[string]interface{}{
+				"tx_id": tx.ID,
+				"error": err.Error(),
+			})
+		} else {
+			s.logger.Info("Marked stuck transaction as failed", map[string]interface{}{
+				"tx_id": tx.ID,
+			})
+		}
+	}
+	return nil
 }
 
 // ProcessPendingSettlements batches and settles pending transactions
@@ -125,15 +202,26 @@ func (s *Service) settleBatch(ctx context.Context, pair string, txs []*domain.Tr
 	}
 
 	// Associate transactions with settlement
-	for _, tx := range txs {
+	txIDs := make([]uuid.UUID, len(txs))
+	for i, tx := range txs {
+		txIDs[i] = tx.ID
+		// Update in-memory objects for consistency if needed later
 		tx.SettlementID = &settlement.ID
 		tx.Status = domain.TransactionStatusSettling
-		if err := s.txRepo.Update(ctx, tx); err != nil {
-			s.logger.Error("Failed to update transaction", map[string]interface{}{
-				"tx_id": tx.ID,
-				"error": err.Error(),
-			})
-		}
+	}
+
+	if err := s.txRepo.BatchUpdateSettlementID(ctx, txIDs, settlement.ID); err != nil {
+		s.logger.Error("Failed to batch update transactions", map[string]interface{}{
+			"settlement_id": settlement.ID,
+			"error":         err.Error(),
+		})
+		// If we can't update the transactions, we should probably fail the settlement creation
+		// or at least not proceed to blockchain submission.
+		// Since settlement is already created, we might want to mark it as failed or delete it?
+		// For now, let's return error so we don't submit to blockchain.
+		settlement.Status = domain.SettlementStatusFailed
+		_ = s.repo.Update(ctx, settlement)
+		return err
 	}
 
 	// Execute blockchain settlement
@@ -169,7 +257,7 @@ func (s *Service) settleBatch(ctx context.Context, pair string, txs []*domain.Tr
 		"settlement_id": settlement.ID,
 		"tx_hash":       result.TxHash,
 		"network":       settlement.Network,
-		"amount":        totalAmount,
+		"amount":        totalAmount.String(),
 	})
 
 	return nil
@@ -178,7 +266,7 @@ func (s *Service) settleBatch(ctx context.Context, pair string, txs []*domain.Tr
 func (s *Service) monitorSettlement(settlementID uuid.UUID, txHash string) {
 	ctx := context.Background()
 	maxAttempts := 30
-	interval := 10 * time.Second
+	interval := s.monitorInterval
 
 	for i := 0; i < maxAttempts; i++ {
 		time.Sleep(interval)
@@ -260,12 +348,15 @@ type Repository interface {
 	Create(ctx context.Context, settlement *domain.Settlement) error
 	Update(ctx context.Context, settlement *domain.Settlement) error
 	FindByID(ctx context.Context, id uuid.UUID) (*domain.Settlement, error)
+	FindSubmitted(ctx context.Context) ([]*domain.Settlement, error)
 }
 
 type TransactionRepository interface {
 	Update(ctx context.Context, tx *domain.Transaction) error
 	FindPendingSettlement(ctx context.Context, limit int) ([]*domain.Transaction, error)
 	FindBySettlementID(ctx context.Context, settlementID uuid.UUID) ([]*domain.Transaction, error)
+	FindStuckPending(ctx context.Context, olderThan time.Duration, limit int) ([]*domain.Transaction, error)
+	BatchUpdateSettlementID(ctx context.Context, txIDs []uuid.UUID, settlementID uuid.UUID) error
 }
 
 type BlockchainConnector interface {

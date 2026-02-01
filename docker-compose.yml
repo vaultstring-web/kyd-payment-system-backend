@@ -40,10 +40,19 @@ services:
       dockerfile: build/docker/Dockerfile.auth
     container_name: kyd-auth
     environment:
-      DATABASE_URL: postgres://kyd_user:kyd_password@postgres:5432/kyd_dev?sslmode=disable
+      DATABASE_URL: postgres://kyd_user:kyd_password@postgres:5432/kyd_dev
+      # For production, set to verify-full and ensure certs are mounted
+      DB_SSL_MODE: disable
+      # Database Connection Pooling (Bank-Grade Tuning)
+      DB_MAX_OPEN_CONNS: 50
+      DB_MAX_IDLE_CONNS: 25
+      DB_CONN_MAX_LIFETIME: 5m
       REDIS_URL: redis://redis:6379
       JWT_SECRET: sk_4f9b8c1e7a23d94f0b6de1a28cd94f71d9f3b0c28c6fa47e9b12df67c8e41a25
+      ENCRYPTION_KEY: ${ENCRYPTION_KEY}
+      HMAC_KEY: ${HMAC_KEY}
       SERVER_PORT: 8080
+      ENV: local
     ports:
       - "3000:8080"
     depends_on:
@@ -60,9 +69,21 @@ services:
     container_name: kyd-payment
     environment:
       DATABASE_URL: postgres://kyd_user:kyd_password@postgres:5432/kyd_dev?sslmode=disable
+      # Database Connection Pooling (Bank-Grade Tuning)
+      DB_MAX_OPEN_CONNS: 50
+      DB_MAX_IDLE_CONNS: 25
+      DB_CONN_MAX_LIFETIME: 5m
       REDIS_URL: redis://redis:6379
       JWT_SECRET: sk_4f9b8c1e7a23d94f0b6de1a28cd94f71d9f3b0c28c6fa47e9b12df67c8e41a25
+      ENCRYPTION_KEY: ${ENCRYPTION_KEY}
+      HMAC_KEY: ${HMAC_KEY}
       SERVER_PORT: 8080
+      # Risk Engine Configuration
+      RISK_ENABLE_CIRCUIT_BREAKER: "true"
+      RISK_MAX_DAILY_LIMIT: 100000000
+      RISK_HIGH_VALUE_THRESHOLD: 100000
+      RISK_ADMIN_APPROVAL_THRESHOLD: 500000
+      RISK_RESTRICTED_COUNTRIES: "KP,IR,SY,CU"
     ports:
       - "3001:8080"
     depends_on:
@@ -78,9 +99,17 @@ services:
       dockerfile: build/docker/Dockerfile.forex
     container_name: kyd-forex
     environment:
-      DATABASE_URL: postgres://kyd_user:kyd_password@postgres:5432/kyd_dev?sslmode=disable
+      DATABASE_URL: postgres://kyd_user:kyd_password@postgres:5432/kyd_dev
+      # For production, set to verify-full and ensure certs are mounted
+      DB_SSL_MODE: disable
+      # Database Connection Pooling (Bank-Grade Tuning)
+      DB_MAX_OPEN_CONNS: 50
+      DB_MAX_IDLE_CONNS: 25
+      DB_CONN_MAX_LIFETIME: 5m
       REDIS_URL: redis://redis:6379
       JWT_SECRET: sk_4f9b8c1e7a23d94f0b6de1a28cd94f71d9f3b0c28c6fa47e9b12df67c8e41a25
+      ENCRYPTION_KEY: ${ENCRYPTION_KEY}
+      HMAC_KEY: ${HMAC_KEY}
       SERVER_PORT: 8080
     ports:
       - "3002:8080"
@@ -98,8 +127,14 @@ services:
     container_name: kyd-wallet
     environment:
       DATABASE_URL: postgres://kyd_user:kyd_password@postgres:5432/kyd_dev?sslmode=disable
+      # Database Connection Pooling (Bank-Grade Tuning)
+      DB_MAX_OPEN_CONNS: 50
+      DB_MAX_IDLE_CONNS: 25
+      DB_CONN_MAX_LIFETIME: 5m
       REDIS_URL: redis://redis:6379
       JWT_SECRET: sk_4f9b8c1e7a23d94f0b6de1a28cd94f71d9f3b0c28c6fa47e9b12df67c8e41a25
+      ENCRYPTION_KEY: ${ENCRYPTION_KEY}
+      HMAC_KEY: ${HMAC_KEY}
       SERVER_PORT: 8080
     ports:
       - "3003:8080"
@@ -117,6 +152,10 @@ services:
     container_name: kyd-settlement
     environment:
       DATABASE_URL: postgres://kyd_user:kyd_password@postgres:5432/kyd_dev?sslmode=disable
+      # Database Connection Pooling (Bank-Grade Tuning)
+      DB_MAX_OPEN_CONNS: 50
+      DB_MAX_IDLE_CONNS: 25
+      DB_CONN_MAX_LIFETIME: 5m
       REDIS_URL: redis://redis:6379
       STELLAR_NETWORK_URL: https://horizon-testnet.stellar.org
       RIPPLE_SERVER_URL: wss://s.altnet.rippletest.net:51233
@@ -128,6 +167,107 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+    restart: unless-stopped
+
+  gateway-service:
+    build:
+      context: .
+      dockerfile: build/docker/Dockerfile.gateway
+    container_name: kyd-gateway
+    environment:
+      DATABASE_URL: postgres://kyd_user:kyd_password@postgres:5432/kyd_dev?sslmode=disable
+      # Database Connection Pooling (Bank-Grade Tuning)
+      DB_MAX_OPEN_CONNS: 50
+      DB_MAX_IDLE_CONNS: 25
+      DB_CONN_MAX_LIFETIME: 5m
+      REDIS_URL: redis://redis:6379
+      JWT_SECRET: sk_4f9b8c1e7a23d94f0b6de1a28cd94f71d9f3b0c28c6fa47e9b12df67c8e41a25
+      SERVER_PORT: 8080
+      ENV: local
+      ALLOWED_ORIGINS: >-
+        http://localhost:3012,
+        http://localhost:3016,
+        http://127.0.0.1:3012,
+        http://127.0.0.1:3016,
+        http://kyd-web:3012,
+        http://kyd-admin:3016,
+        http://host.docker.internal:3012,
+        http://host.docker.internal:3016,
+        https://localhost:3012,
+        https://localhost:3016,
+        https://kyd-web:3012,
+        https://kyd-admin:3016,
+        https://host.docker.internal:3012,
+        https://host.docker.internal:3016
+      AUTH_SERVICE_URL: http://auth-service:8080
+      PAYMENT_SERVICE_URL: http://payment-service:8080
+      FOREX_SERVICE_URL: http://forex-service:8080
+      WALLET_SERVICE_URL: http://wallet-service:8080
+      SETTLEMENT_SERVICE_URL: http://settlement-service:8080
+    ports:
+      - "9000:8080"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+      auth-service:
+        condition: service_started
+    restart: unless-stopped
+
+  seed-runner:
+    image: golang:1.24.11-alpine
+    container_name: kyd-seed
+    working_dir: /app
+    volumes:
+      - ./:/app
+    environment:
+      DATABASE_URL: postgres://kyd_user:kyd_password@postgres:5432/kyd_dev?sslmode=disable
+      # Database Connection Pooling (Bank-Grade Tuning)
+      DB_MAX_OPEN_CONNS: 50
+      DB_MAX_IDLE_CONNS: 25
+      DB_CONN_MAX_LIFETIME: 5m
+      REDIS_URL: redis://redis:6379
+      JWT_SECRET: sk_4f9b8c1e7a23d94f0b6de1a28cd94f71d9f3b0c28c6fa47e9b12df67c8e41a25
+      SERVER_PORT: 8080
+      ADMIN_EMAIL: admin@example.com
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    command: ["/bin/sh", "-c", "go mod download && go run ./cmd/seed/main.go"]
+    profiles: ["tools"]
+    restart: "no"
+
+  admin-frontend:
+    build:
+      context: ../admin
+      dockerfile: Dockerfile
+      args:
+        NEXT_PUBLIC_GATEWAY_URL: http://localhost:9000
+    container_name: kyd-admin
+    environment:
+      GATEWAY_INTERNAL_URL: http://kyd-gateway:8080
+    ports:
+      - "3016:3016"
+    depends_on:
+      - gateway-service
+    restart: unless-stopped
+
+  web-frontend:
+    build:
+      context: ../vaultstring-frontend
+      dockerfile: Dockerfile
+      args:
+        NEXT_PUBLIC_GATEWAY_URL: http://localhost:9000
+    container_name: kyd-web
+    environment:
+      GATEWAY_INTERNAL_URL: http://kyd-gateway:8080
+    ports:
+      - "3012:3012"
+    depends_on:
+      - gateway-service
     restart: unless-stopped
 
 volumes:

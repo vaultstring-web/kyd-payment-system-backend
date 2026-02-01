@@ -49,7 +49,7 @@ func (h *WalletHandler) CreateWallet(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	userID, ok := r.Context().Value("user_id").(uuid.UUID)
+	userID, ok := middleware.UserIDFromContext(r.Context())
 	if !ok {
 		h.respondError(w, http.StatusUnauthorized, "Unauthorized")
 		return
@@ -57,8 +57,8 @@ func (h *WalletHandler) CreateWallet(w http.ResponseWriter, r *http.Request) {
 
 	req.UserID = userID
 
-	if err := h.validator.Validate(&req); err != nil {
-		h.respondError(w, http.StatusBadRequest, err.Error())
+	if errs := h.validator.ValidateStructured(&req); errs != nil {
+		h.respondValidationErrors(w, errs)
 		return
 	}
 
@@ -121,6 +121,31 @@ func (h *WalletHandler) GetUserWallets(w http.ResponseWriter, r *http.Request) {
 	})
 }
 
+// GetAllWallets lists all wallets (Admin only).
+func (h *WalletHandler) GetAllWallets(w http.ResponseWriter, r *http.Request) {
+	ut, _ := middleware.UserTypeFromContext(r.Context())
+	if ut != "admin" {
+		h.respondError(w, http.StatusForbidden, "admin access required")
+		return
+	}
+
+	limit, offset := parsePagination(r)
+
+	wallets, total, err := h.service.GetAllWallets(r.Context(), limit, offset)
+	if err != nil {
+		h.respondError(w, http.StatusInternalServerError, "Failed to fetch wallets")
+		return
+	}
+
+	h.respondJSON(w, http.StatusOK, map[string]interface{}{
+		"wallets": wallets,
+		"total":   total,
+		"limit":   limit,
+		"offset":  offset,
+		"count":   len(wallets),
+	})
+}
+
 // GetBalance returns a wallet balance summary.
 func (h *WalletHandler) GetBalance(w http.ResponseWriter, r *http.Request) {
 	vars := mux.Vars(r)
@@ -139,8 +164,57 @@ func (h *WalletHandler) GetBalance(w http.ResponseWriter, r *http.Request) {
 	h.respondJSON(w, http.StatusOK, balance)
 }
 
-// GetTransactionHistory returns transaction history for a wallet (stub).
+// LookupWallet resolves a wallet address to user details.
+func (h *WalletHandler) LookupWallet(w http.ResponseWriter, r *http.Request) {
+	address := r.URL.Query().Get("address")
+	if address == "" {
+		h.respondError(w, http.StatusBadRequest, "Address is required")
+		return
+	}
+
+	info, err := h.service.LookupWallet(r.Context(), address)
+	if err != nil {
+		h.logger.Error("Wallet lookup failed", map[string]interface{}{
+			"address": address,
+			"error":   err.Error(),
+		})
+		h.respondError(w, http.StatusNotFound, "Wallet not found")
+		return
+	}
+
+	h.respondJSON(w, http.StatusOK, info)
+}
+
+// SearchWallets returns a list of suggested wallets for a partial address.
+func (h *WalletHandler) SearchWallets(w http.ResponseWriter, r *http.Request) {
+	query := r.URL.Query().Get("q")
+	if query == "" {
+		// Return empty list if no query
+		h.respondJSON(w, http.StatusOK, []interface{}{})
+		return
+	}
+
+	results, err := h.service.SearchWallets(r.Context(), query)
+	if err != nil {
+		h.logger.Error("Wallet search failed", map[string]interface{}{
+			"query": query,
+			"error": err.Error(),
+		})
+		h.respondError(w, http.StatusInternalServerError, "Search failed")
+		return
+	}
+
+	h.respondJSON(w, http.StatusOK, results)
+}
+
+// GetTransactionHistory returns transaction history for a wallet.
 func (h *WalletHandler) GetTransactionHistory(w http.ResponseWriter, r *http.Request) {
+	userID, ok := middleware.UserIDFromContext(r.Context())
+	if !ok {
+		h.respondError(w, http.StatusUnauthorized, "Unauthorized")
+		return
+	}
+
 	vars := mux.Vars(r)
 	walletID, err := uuid.Parse(vars["id"])
 	if err != nil {
@@ -148,10 +222,21 @@ func (h *WalletHandler) GetTransactionHistory(w http.ResponseWriter, r *http.Req
 		return
 	}
 
-	// TODO: Implement transaction history
+	limit, offset := parsePagination(r)
+
+	txs, total, err := h.service.GetTransactionHistory(r.Context(), walletID, userID, limit, offset)
+	if err != nil {
+		h.respondError(w, http.StatusInternalServerError, "Failed to fetch transaction history")
+		return
+	}
+
 	h.respondJSON(w, http.StatusOK, map[string]interface{}{
 		"wallet_id":    walletID,
-		"transactions": []interface{}{},
+		"transactions": txs,
+		"total":        total,
+		"limit":        limit,
+		"offset":       offset,
+		"count":        len(txs),
 	})
 }
 
@@ -166,4 +251,11 @@ func (h *WalletHandler) respondJSON(w http.ResponseWriter, status int, data inte
 
 func (h *WalletHandler) respondError(w http.ResponseWriter, status int, message string) {
 	h.respondJSON(w, status, map[string]string{"error": message})
+}
+
+func (h *WalletHandler) respondValidationErrors(w http.ResponseWriter, errors map[string]string) {
+	h.respondJSON(w, http.StatusBadRequest, map[string]interface{}{
+		"error":             "Validation failed",
+		"validation_errors": errors,
+	})
 }

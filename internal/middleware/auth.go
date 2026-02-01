@@ -3,6 +3,7 @@ package middleware
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/http"
 	"strings"
@@ -20,14 +21,23 @@ const (
 	ctxUserTypeKey contextKey = "user_type"
 )
 
+// TokenBlacklist defines the interface for checking revoked tokens.
+type TokenBlacklist interface {
+	IsBlacklisted(ctx context.Context, token string) (bool, error)
+}
+
 // AuthMiddleware validates bearer JWTs and injects user identity into the context.
 type AuthMiddleware struct {
 	jwtSecret string
+	blacklist TokenBlacklist
 }
 
-// NewAuthMiddleware constructs an AuthMiddleware with the given secret.
-func NewAuthMiddleware(secret string) *AuthMiddleware {
-	return &AuthMiddleware{jwtSecret: secret}
+// NewAuthMiddleware constructs an AuthMiddleware with the given secret and optional blacklist.
+func NewAuthMiddleware(secret string, blacklist TokenBlacklist) *AuthMiddleware {
+	return &AuthMiddleware{
+		jwtSecret: secret,
+		blacklist: blacklist,
+	}
 }
 
 // Authenticate enforces bearer auth and populates user details on the request context.
@@ -35,16 +45,30 @@ func (m *AuthMiddleware) Authenticate(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		authHeader := r.Header.Get("Authorization")
 		if strings.TrimSpace(authHeader) == "" {
-			http.Error(w, "Authorization header required", http.StatusUnauthorized)
+			respondJSONError(w, http.StatusUnauthorized, "Authorization header required")
 			return
 		}
 
 		parts := strings.Fields(authHeader)
 		if len(parts) != 2 || !strings.EqualFold(parts[0], "Bearer") {
-			http.Error(w, "Invalid authorization format", http.StatusUnauthorized)
+			respondJSONError(w, http.StatusUnauthorized, "Invalid authorization format")
 			return
 		}
 		tokenString := parts[1]
+
+		// Check blacklist if configured
+		if m.blacklist != nil {
+			revoked, err := m.blacklist.IsBlacklisted(r.Context(), tokenString)
+			if err != nil {
+				// Fail secure
+				respondJSONError(w, http.StatusServiceUnavailable, "Authentication service unavailable")
+				return
+			}
+			if revoked {
+				respondJSONError(w, http.StatusUnauthorized, "Token revoked")
+				return
+			}
+		}
 
 		token, err := jwt.Parse(tokenString, func(token *jwt.Token) (interface{}, error) {
 			if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
@@ -54,25 +78,26 @@ func (m *AuthMiddleware) Authenticate(next http.Handler) http.Handler {
 		})
 
 		if err != nil || !token.Valid {
-			http.Error(w, "Invalid token", http.StatusUnauthorized)
+			fmt.Printf("AuthMiddleware: Invalid token: %v\n", err)
+			respondJSONError(w, http.StatusUnauthorized, "Invalid token")
 			return
 		}
 
 		claims, ok := token.Claims.(jwt.MapClaims)
 		if !ok {
-			http.Error(w, "Invalid token claims", http.StatusUnauthorized)
+			respondJSONError(w, http.StatusUnauthorized, "Invalid token claims")
 			return
 		}
 
 		userIDStr, ok := claims["user_id"].(string)
 		if !ok {
-			http.Error(w, "Invalid user ID in token", http.StatusUnauthorized)
+			respondJSONError(w, http.StatusUnauthorized, "Invalid user ID in token")
 			return
 		}
 
 		userID, err := uuid.Parse(userIDStr)
 		if err != nil {
-			http.Error(w, "Invalid user ID format", http.StatusUnauthorized)
+			respondJSONError(w, http.StatusUnauthorized, "Invalid user ID format")
 			return
 		}
 
@@ -100,11 +125,25 @@ func UserTypeFromContext(ctx context.Context) (string, bool) {
 	return ut, ok
 }
 
+func respondJSONError(w http.ResponseWriter, status int, message string) {
+	w.Header().Set("Content-Type", "application/json")
+	w.WriteHeader(status)
+	json.NewEncoder(w).Encode(map[string]string{"error": message})
+}
+
 func CORS(next http.Handler) http.Handler {
+
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Header().Set("Access-Control-Allow-Origin", "*")
+		origin := r.Header.Get("Origin")
+		// Allow localhost for development and specific production domains
+		if origin != "" && (strings.HasPrefix(origin, "http://localhost") ||
+			strings.HasPrefix(origin, "http://127.0.0.1") ||
+			strings.HasSuffix(origin, ".kyd.com")) {
+			w.Header().Set("Access-Control-Allow-Origin", origin)
+		}
+
 		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
-		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Correlation-ID")
 		w.Header().Set("Access-Control-Max-Age", "3600")
 
 		if r.Method == "OPTIONS" {

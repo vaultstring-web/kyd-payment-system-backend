@@ -6,27 +6,40 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
+	"time"
 
 	"kyd/internal/auth"
+	"kyd/internal/domain"
 	"kyd/internal/middleware"
 	"kyd/pkg/errors"
 	"kyd/pkg/logger"
 	"kyd/pkg/validator"
+
+	"github.com/pquerna/otp/totp"
 )
 
 // AuthHandler handles authentication endpoints.
 type AuthHandler struct {
-	service   *auth.Service
-	validator *validator.Validator
-	logger    logger.Logger
+	service      *auth.Service
+	validator    *validator.Validator
+	logger       logger.Logger
+	totpIssuer   string
+	totpPeriod   int
+	totpDigits   int
+	cookieSecure bool
 }
 
 // NewAuthHandler creates a new AuthHandler.
-func NewAuthHandler(service *auth.Service, val *validator.Validator, log logger.Logger) *AuthHandler {
+func NewAuthHandler(service *auth.Service, val *validator.Validator, log logger.Logger, totpIssuer string, totpPeriod int, totpDigits int, cookieSecure bool) *AuthHandler {
 	return &AuthHandler{
-		service:   service,
-		validator: val,
-		logger:    log,
+		service:      service,
+		validator:    val,
+		logger:       log,
+		totpIssuer:   totpIssuer,
+		totpPeriod:   totpPeriod,
+		totpDigits:   totpDigits,
+		cookieSecure: cookieSecure,
 	}
 }
 
@@ -47,8 +60,8 @@ func (h *AuthHandler) Register(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := h.validator.Validate(&req); err != nil {
-		h.respondError(w, http.StatusBadRequest, err.Error())
+	if errs := h.validator.ValidateStructured(&req); errs != nil {
+		h.respondValidationErrors(w, errs)
 		return
 	}
 
@@ -72,6 +85,9 @@ func (h *AuthHandler) Register(w http.ResponseWriter, r *http.Request) {
 		"ip":      r.RemoteAddr,
 	})
 
+	// Set httpOnly cookies for access and refresh tokens
+	h.setAuthCookies(w, response)
+
 	h.respondJSON(w, http.StatusCreated, response)
 }
 
@@ -92,8 +108,22 @@ func (h *AuthHandler) Login(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := h.validator.Validate(&req); err != nil {
-		h.respondError(w, http.StatusBadRequest, err.Error())
+	// Enrich with device info
+	req.IPAddress = r.Header.Get("X-Forwarded-For")
+	if req.IPAddress == "" {
+		req.IPAddress = r.RemoteAddr
+	}
+	req.DeviceName = r.Header.Get("User-Agent")
+	if req.DeviceID == "" {
+		req.DeviceID = r.Header.Get("X-Device-ID")
+		if req.DeviceID == "" && req.DeviceName != "" {
+			// Fallback: Use User-Agent as DeviceID
+			req.DeviceID = req.DeviceName
+		}
+	}
+
+	if errs := h.validator.ValidateStructured(&req); errs != nil {
+		h.respondValidationErrors(w, errs)
 		return
 	}
 
@@ -116,6 +146,9 @@ func (h *AuthHandler) Login(w http.ResponseWriter, r *http.Request) {
 		"ip":      r.RemoteAddr,
 	})
 
+	// Set httpOnly cookies for access and refresh tokens
+	h.setAuthCookies(w, response)
+
 	h.respondJSON(w, http.StatusOK, response)
 }
 
@@ -136,7 +169,7 @@ func (h *AuthHandler) Me(w http.ResponseWriter, r *http.Request) {
 
 // SendVerification triggers an email verification email to the given address.
 type sendVerificationRequest struct {
-	Email string `json:"email"`
+	Email string `json:"email" validate:"required,email"`
 }
 
 func (h *AuthHandler) SendVerification(w http.ResponseWriter, r *http.Request) {
@@ -146,11 +179,19 @@ func (h *AuthHandler) SendVerification(w http.ResponseWriter, r *http.Request) {
 		h.respondError(w, http.StatusBadRequest, "Invalid request body")
 		return
 	}
-	if req.Email == "" {
-		h.respondError(w, http.StatusBadRequest, "Email is required")
+
+	if errs := h.validator.ValidateStructured(&req); errs != nil {
+		h.respondValidationErrors(w, errs)
 		return
 	}
-	_ = h.service.SendVerificationByEmail(r.Context(), req.Email)
+
+	if err := h.service.SendVerificationByEmail(r.Context(), req.Email); err != nil {
+		h.logger.Error("Failed to send verification email", map[string]interface{}{
+			"error": err.Error(),
+			"email": req.Email,
+		})
+		// Do not return error to user to prevent enumeration
+	}
 	h.respondJSON(w, http.StatusAccepted, map[string]string{"status": "verification email requested"})
 }
 
@@ -191,6 +232,13 @@ func (h *AuthHandler) respondError(w http.ResponseWriter, status int, message st
 	h.respondJSON(w, status, map[string]string{"error": message})
 }
 
+func (h *AuthHandler) respondValidationErrors(w http.ResponseWriter, errors map[string]string) {
+	h.respondJSON(w, http.StatusBadRequest, map[string]interface{}{
+		"error":             "Validation failed",
+		"validation_errors": errors,
+	})
+}
+
 // DebugUser returns basic user info for a given email in development.
 func (h *AuthHandler) DebugUser(w http.ResponseWriter, r *http.Request) {
 	email := r.URL.Query().Get("email")
@@ -211,4 +259,188 @@ func (h *AuthHandler) DebugUser(w http.ResponseWriter, r *http.Request) {
 		"locked_until":    user.LockedUntil,
 	}
 	h.respondJSON(w, http.StatusOK, resp)
+}
+
+func (h *AuthHandler) setAuthCookies(w http.ResponseWriter, resp *auth.TokenResponse) {
+	sameSite := http.SameSiteNoneMode
+	if !h.cookieSecure {
+		sameSite = http.SameSiteLaxMode
+	}
+
+	// Access token cookie
+	http.SetCookie(w, &http.Cookie{
+		Name:     "access_token",
+		Value:    resp.AccessToken,
+		Path:     "/",
+		HttpOnly: true,
+		SameSite: sameSite,
+		Secure:   h.cookieSecure,
+		MaxAge:   int(time.Until(resp.ExpiresAt).Seconds()),
+	})
+	// Refresh token cookie
+	http.SetCookie(w, &http.Cookie{
+		Name:     "refresh_token",
+		Value:    resp.RefreshToken,
+		Path:     "/",
+		HttpOnly: true,
+		SameSite: sameSite,
+		Secure:   h.cookieSecure,
+		MaxAge:   30 * 24 * 60 * 60,
+	})
+}
+
+func (h *AuthHandler) clearAuthCookies(w http.ResponseWriter) {
+	http.SetCookie(w, &http.Cookie{
+		Name:     "access_token",
+		Value:    "",
+		Path:     "/",
+		HttpOnly: true,
+		SameSite: http.SameSiteStrictMode,
+		Secure:   h.cookieSecure,
+		MaxAge:   0,
+	})
+	http.SetCookie(w, &http.Cookie{
+		Name:     "refresh_token",
+		Value:    "",
+		Path:     "/",
+		HttpOnly: true,
+		SameSite: http.SameSiteStrictMode,
+		Secure:   h.cookieSecure,
+		MaxAge:   0,
+	})
+}
+
+func (h *AuthHandler) Logout(w http.ResponseWriter, r *http.Request) {
+	// Extract token from header to blacklist it
+	authHeader := r.Header.Get("Authorization")
+	if strings.HasPrefix(authHeader, "Bearer ") {
+		token := strings.TrimPrefix(authHeader, "Bearer ")
+		if err := h.service.Logout(r.Context(), token); err != nil {
+			h.logger.Error("Failed to blacklist token", map[string]interface{}{"error": err.Error()})
+			// Continue to clear cookies anyway
+		}
+	}
+
+	h.clearAuthCookies(w)
+	h.respondJSON(w, http.StatusOK, map[string]string{"status": "logged_out"})
+}
+
+type totpSetupResponse struct {
+	OTPURL string `json:"otp_url"`
+}
+
+type totpVerifyRequest struct {
+	Code string `json:"code" validate:"required"`
+}
+
+type totpStatusResponse struct {
+	Enabled bool `json:"enabled"`
+}
+
+func (h *AuthHandler) SetupTOTP(w http.ResponseWriter, r *http.Request) {
+	userID, ok := middleware.UserIDFromContext(r.Context())
+	if !ok {
+		h.respondError(w, http.StatusUnauthorized, "Unauthorized")
+		return
+	}
+	user, err := h.service.GetUserByID(r.Context(), userID)
+	if err != nil {
+		h.respondError(w, http.StatusNotFound, "User not found")
+		return
+	}
+	// Allow all users to setup TOTP
+	key, err := totp.Generate(totp.GenerateOpts{
+		Issuer:      h.totpIssuer,
+		AccountName: user.Email,
+	})
+	if err != nil {
+		h.respondError(w, http.StatusInternalServerError, "TOTP setup failed")
+		return
+	}
+
+	// Save secret to DB (encrypted by repo)
+	secret := key.Secret()
+	user.TOTPSecret = &secret
+	user.IsTOTPEnabled = false
+	if err := h.service.UpdateUser(r.Context(), user); err != nil {
+		h.respondError(w, http.StatusInternalServerError, "Failed to save TOTP secret")
+		return
+	}
+
+	h.respondJSON(w, http.StatusOK, totpSetupResponse{OTPURL: key.URL()})
+}
+
+func (h *AuthHandler) VerifyTOTP(w http.ResponseWriter, r *http.Request) {
+	userID, ok := middleware.UserIDFromContext(r.Context())
+	if !ok {
+		h.respondError(w, http.StatusUnauthorized, "Unauthorized")
+		return
+	}
+	user, err := h.service.GetUserByID(r.Context(), userID)
+	if err != nil {
+		h.respondError(w, http.StatusNotFound, "User not found")
+		return
+	}
+	if user.UserType != domain.UserTypeAdmin {
+		h.respondError(w, http.StatusForbidden, "Forbidden")
+		return
+	}
+	var req totpVerifyRequest
+	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
+	dec := json.NewDecoder(r.Body)
+	dec.DisallowUnknownFields()
+	if err := dec.Decode(&req); err != nil {
+		h.respondError(w, http.StatusBadRequest, "Invalid request body")
+		return
+	}
+
+	if errs := h.validator.ValidateStructured(&req); errs != nil {
+		h.respondValidationErrors(w, errs)
+		return
+	}
+
+	if user.TOTPSecret == nil || *user.TOTPSecret == "" {
+		h.respondError(w, http.StatusBadRequest, "TOTP not set up")
+		return
+	}
+
+	if !totp.Validate(req.Code, *user.TOTPSecret) {
+		h.respondError(w, http.StatusUnauthorized, "Invalid code")
+		return
+	}
+
+	user.IsTOTPEnabled = true
+	if err := h.service.UpdateUser(r.Context(), user); err != nil {
+		h.respondError(w, http.StatusInternalServerError, "Failed to enable TOTP")
+		return
+	}
+
+	h.respondJSON(w, http.StatusOK, map[string]string{"status": "totp_verified"})
+}
+
+func (h *AuthHandler) TOTPStatus(w http.ResponseWriter, r *http.Request) {
+	userID, ok := middleware.UserIDFromContext(r.Context())
+	if !ok {
+		h.respondError(w, http.StatusUnauthorized, "Unauthorized")
+		return
+	}
+	user, err := h.service.GetUserByID(r.Context(), userID)
+	if err != nil {
+		h.respondError(w, http.StatusNotFound, "User not found")
+		return
+	}
+	// Removed admin-only restriction
+	h.respondJSON(w, http.StatusOK, totpStatusResponse{Enabled: user.IsTOTPEnabled})
+}
+
+func maskEmail(email string) string {
+	parts := strings.Split(email, "@")
+	if len(parts) != 2 {
+		return "***"
+	}
+	name := parts[0]
+	if len(name) <= 2 {
+		return "***@" + parts[1]
+	}
+	return name[:2] + "***@" + parts[1]
 }

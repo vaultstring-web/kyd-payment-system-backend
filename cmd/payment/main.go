@@ -5,12 +5,17 @@ package main
 
 import (
 	"context"
+	"crypto/rand"
+	"crypto/tls"
+	"crypto/x509"
 	"encoding/json"
 	"fmt"
+	"math/big"
 	"net/http"
 	"os"
 	"os/signal"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -19,20 +24,55 @@ import (
 	"github.com/jmoiron/sqlx"
 	_ "github.com/lib/pq"
 	"github.com/redis/go-redis/v9"
+	"golang.org/x/crypto/bcrypt"
 
+	"kyd/internal/blockchain/ripple"
+	"kyd/internal/blockchain/stellar"
 	"kyd/internal/domain"
 	"kyd/internal/forex"
 	"kyd/internal/handler"
 	"kyd/internal/ledger"
 	"kyd/internal/middleware"
+	"kyd/internal/notification"
 	"kyd/internal/payment"
 	"kyd/internal/repository/postgres"
+	"kyd/internal/security"
+	"kyd/internal/settlement"
+	"kyd/internal/wallet"
 	"kyd/pkg/config"
 	"kyd/pkg/logger"
 	"kyd/pkg/validator"
 )
 
+func loadEnv() {
+	content, err := os.ReadFile(".env")
+	if err != nil {
+		// Try looking up one directory if we are in cmd/payment
+		content, err = os.ReadFile("../../.env")
+		if err != nil {
+			return // No .env found, rely on process env
+		}
+	}
+
+	lines := strings.Split(string(content), "\n")
+	for _, line := range lines {
+		line = strings.TrimSpace(line)
+		if line == "" || strings.HasPrefix(line, "#") {
+			continue
+		}
+		parts := strings.SplitN(line, "=", 2)
+		if len(parts) == 2 {
+			k := strings.TrimSpace(parts[0])
+			v := strings.TrimSpace(parts[1])
+			if os.Getenv(k) == "" {
+				os.Setenv(k, v)
+			}
+		}
+	}
+}
+
 func main() {
+	loadEnv()
 	cfg := config.Load()
 	log := logger.New("payment-service")
 
@@ -81,31 +121,73 @@ func main() {
 
 	log.Info("Redis connected", nil)
 
+	// Initialize security service
+	cryptoService, err := security.NewCryptoService()
+	if err != nil {
+		log.Fatal("Failed to initialize crypto service", map[string]interface{}{
+			"error": err.Error(),
+		})
+	}
+
 	// Initialize repositories
 	txRepo := postgres.NewTransactionRepository(db)
 	walletRepo := postgres.NewWalletRepository(db)
 	forexRepo := postgres.NewForexRepository(db)
-	userRepo := postgres.NewUserRepository(db)
+	userRepo := postgres.NewUserRepository(db, cryptoService)
 	settlementRepo := postgres.NewSettlementRepository(db)
+	auditRepo := postgres.NewAuditRepository(db)
+	ledgerRepo := postgres.NewLedgerRepository(db)
 
 	// Initialize services
-	ledgerService := ledger.NewService(db.DB)
+	ledgerService := ledger.NewService(db, ledgerRepo)
+
+	// Initialize blockchain connectors
+	stellarConnector, err := stellar.NewConnector(
+		cfg.Stellar.NetworkURL,
+		cfg.Stellar.SecretKey,
+		true, // Use simulation mode for now
+	)
+	if err != nil {
+		log.Fatal("Failed to initialize Stellar connector", map[string]interface{}{"error": err.Error()})
+	}
+
+	rippleConnector, err := ripple.NewConnector(
+		cfg.Ripple.ServerURL,
+		cfg.Ripple.SecretKey,
+	)
+	if err != nil {
+		log.Fatal("Failed to initialize Ripple connector", map[string]interface{}{"error": err.Error()})
+	}
+
+	// Initialize Settlement Service (Background Worker)
+	_ = settlement.NewService(
+		settlementRepo,
+		txRepo,
+		stellarConnector,
+		rippleConnector,
+		log,
+	)
 
 	// Initialize forex providers
 	forexProviders := []forex.RateProvider{
-		forex.NewExchangeRateAPIProvider(),
 		forex.NewMockRateProvider(),
+		forex.NewExchangeRateAPIProvider(),
 	}
+
+	// Initialize Notification Service
+	notificationService := notification.NewService(log, auditRepo)
 
 	// Wrap redis client with RateCache adapter
 	rateCache := forex.NewRedisRateCache(redisClient)
 	forexService := forex.NewService(forexRepo, rateCache, forexProviders, log)
 
-	paymentService := payment.NewService(txRepo, walletRepo, forexService, ledgerService, userRepo, log)
+	paymentService := payment.NewService(txRepo, walletRepo, forexService, ledgerService, userRepo, notificationService, auditRepo, log, cfg)
+	walletService := wallet.NewService(walletRepo, txRepo, userRepo, log)
 
 	// Initialize handlers
 	val := validator.New()
 	paymentHandler := handler.NewPaymentHandler(paymentService, val, log)
+	walletHandler := handler.NewWalletHandler(walletService, val, log)
 
 	// Setup router
 	r := mux.NewRouter()
@@ -117,10 +199,12 @@ func main() {
 	r.Use(middleware.CorrelationID)
 	r.Use(middleware.NewLoggingMiddleware(log).Log)
 	r.Use(middleware.BodyLimit(1 << 20)) // 1MB global cap
-	r.Use(middleware.NewRateLimiter(redisClient, 150, time.Minute).Limit)
+	r.Use(middleware.NewRateLimiter(redisClient, 150, time.Minute).WithAdaptive(10, 30*time.Minute).Limit)
 
-	authMW := middleware.NewAuthMiddleware(cfg.JWT.Secret)
+	blacklist := middleware.NewRedisTokenBlacklist(redisClient)
+	authMW := middleware.NewAuthMiddleware(cfg.JWT.Secret, blacklist)
 	idemMW := middleware.NewIdempotencyMiddleware(redisClient, 24*time.Hour)
+	auditMW := middleware.NewAuditMiddleware(auditRepo, log)
 
 	// Health check routes (no auth)
 	r.HandleFunc("/health", healthCheck).Methods("GET")
@@ -128,12 +212,35 @@ func main() {
 
 	// Protected routes
 	api := r.PathPrefix("/api/v1").Subrouter()
+	api.Use(auditMW.Audit) // Audit logs for all API requests
 	api.Use(authMW.Authenticate)
-	api.Use(middleware.NewRateLimiter(redisClient, 60, time.Minute).Limit)
+	api.Use(idemMW.Require) // Enforce Idempotency-Key
+	api.Use(middleware.NewRateLimiter(redisClient, 60, time.Minute).WithAdaptive(5, 15*time.Minute).Limit)
+
+	api.HandleFunc("/wallets", walletHandler.GetUserWallets).Methods("GET")
+	api.HandleFunc("/wallets/lookup", walletHandler.LookupWallet).Methods("GET")
+	api.HandleFunc("/wallets/search", walletHandler.SearchWallets).Methods("GET")
+	api.HandleFunc("/wallets/{id}/transactions", walletHandler.GetTransactionHistory).Methods("GET")
+	api.HandleFunc("/payments", paymentHandler.InitiatePayment).Methods("POST")
+	api.HandleFunc("/payments/initiate", paymentHandler.InitiatePayment).Methods("POST") // Add explicit route
+	api.HandleFunc("/payments", paymentHandler.GetTransactions).Methods("GET")
+	api.HandleFunc("/transactions/{id}/receipt", paymentHandler.GetReceipt).Methods("GET")
+	api.HandleFunc("/disputes", paymentHandler.InitiateDispute).Methods("POST")
 
 	// Admin routes
 	admin := api.PathPrefix("/admin").Subrouter()
-	admin.Use(middleware.NewRateLimiter(redisClient, 60, time.Minute).Limit)
+	admin.Use(middleware.NewRateLimiter(redisClient, 60, time.Minute).WithAdaptive(5, 15*time.Minute).Limit)
+	// Admin: Transaction Management
+	admin.HandleFunc("/transactions", paymentHandler.GetAllTransactions).Methods("GET")
+	admin.HandleFunc("/transactions/pending", paymentHandler.GetPendingTransactions).Methods("GET")
+	admin.HandleFunc("/transactions/{id}/review", paymentHandler.ReviewTransaction).Methods("POST")
+	admin.HandleFunc("/stats", paymentHandler.GetSystemStats).Methods("GET")
+	admin.HandleFunc("/risk/alerts", paymentHandler.GetRiskAlerts).Methods("GET")
+	admin.HandleFunc("/audit-logs", paymentHandler.GetAuditLogs).Methods("GET")
+	admin.HandleFunc("/disputes", paymentHandler.GetDisputes).Methods("GET")
+	admin.HandleFunc("/disputes/resolve", paymentHandler.ResolveDispute).Methods("POST")
+
+	admin.HandleFunc("/wallets", walletHandler.GetAllWallets).Methods("GET")
 	admin.HandleFunc("/users", func(w http.ResponseWriter, r *http.Request) {
 		ut, _ := middleware.UserTypeFromContext(r.Context())
 		if ut != "admin" {
@@ -171,6 +278,774 @@ func main() {
 		b, _ := json.Marshal(Resp{Users: users, Total: total, Limit: limit, Offset: offset})
 		w.Write(b)
 	}).Methods("GET")
+
+	admin.HandleFunc("/users/{id}", func(w http.ResponseWriter, r *http.Request) {
+		ut, _ := middleware.UserTypeFromContext(r.Context())
+		if ut != "admin" {
+			w.WriteHeader(http.StatusForbidden)
+			w.Write([]byte(`{"error":"admin access required"}`))
+			return
+		}
+		vars := mux.Vars(r)
+		id, err := uuid.Parse(vars["id"])
+		if err != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			w.Write([]byte(`{"error":"invalid user id"}`))
+			return
+		}
+
+		var req struct {
+			Password      string `json:"password,omitempty"`
+			FirstName     string `json:"first_name,omitempty"`
+			LastName      string `json:"last_name,omitempty"`
+			Email         string `json:"email,omitempty"`
+			Phone         string `json:"phone,omitempty"`
+			AccountStatus string `json:"account_status,omitempty"` // active/blocked
+			Role          string `json:"role,omitempty"`           // user/admin/support
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			w.Write([]byte(`{"error":"invalid request body"}`))
+			return
+		}
+
+		user, err := userRepo.FindByID(r.Context(), id)
+		if err != nil {
+			w.WriteHeader(http.StatusNotFound)
+			w.Write([]byte(`{"error":"user not found"}`))
+			return
+		}
+
+		changes := make(domain.Metadata)
+
+		if req.Password != "" {
+			hash, err := bcrypt.GenerateFromPassword([]byte(req.Password), bcrypt.DefaultCost)
+			if err != nil {
+				w.WriteHeader(http.StatusInternalServerError)
+				return
+			}
+			user.PasswordHash = string(hash)
+			changes["password"] = "updated"
+		}
+		if req.FirstName != "" {
+			user.FirstName = req.FirstName
+			changes["first_name"] = req.FirstName
+		}
+		if req.LastName != "" {
+			user.LastName = req.LastName
+			changes["last_name"] = req.LastName
+		}
+		if req.Email != "" {
+			user.Email = req.Email
+			changes["email"] = req.Email
+		}
+		if req.Phone != "" {
+			user.Phone = req.Phone
+			changes["phone"] = req.Phone
+		}
+		if req.AccountStatus != "" {
+			isActive := req.AccountStatus == "active"
+			user.IsActive = isActive
+			changes["is_active"] = isActive
+		}
+		if req.Role != "" {
+			user.UserType = domain.UserType(req.Role)
+			changes["role"] = req.Role
+		}
+
+		if err := userRepo.Update(r.Context(), user); err != nil {
+			log.Error("Failed to update user", map[string]interface{}{"error": err.Error(), "user_id": id})
+			w.WriteHeader(http.StatusInternalServerError)
+			w.Write([]byte(`{"error":"failed to update user"}`))
+			return
+		}
+
+		// Audit Log
+		entityType := "user"
+		ip := r.RemoteAddr
+		ua := r.UserAgent()
+
+		auditRepo.Create(r.Context(), &domain.AuditLog{
+			UserID:     &id,
+			Action:     "ADMIN_UPDATE_USER",
+			EntityID:   &id,
+			EntityType: &entityType,
+			NewValues:  &changes,
+			IPAddress:  &ip,
+			UserAgent:  &ua,
+		})
+
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"message":"user updated successfully"}`))
+	}).Methods("PATCH")
+
+	admin.HandleFunc("/blockchain/networks", func(w http.ResponseWriter, r *http.Request) {
+		ut, _ := middleware.UserTypeFromContext(r.Context())
+		if ut != "admin" {
+			w.WriteHeader(http.StatusForbidden)
+			w.Write([]byte(`{"error":"admin access required"}`))
+			return
+		}
+
+		type BlockchainNetwork struct {
+			NetworkID     string `json:"network_id"`
+			Name          string `json:"name"`
+			Status        string `json:"status"`
+			Height        int    `json:"height"`
+			PeerCount     int    `json:"peer_count"`
+			LastBlockTime string `json:"last_block_time"`
+			Channel       string `json:"channel"`
+		}
+
+		// Mocked networks
+		networks := []BlockchainNetwork{
+			{
+				NetworkID:     "net-stellar-test",
+				Name:          "Stellar Testnet",
+				Status:        "active",
+				Height:        123456,
+				PeerCount:     15,
+				LastBlockTime: time.Now().Format(time.RFC3339),
+				Channel:       "public",
+			},
+			{
+				NetworkID:     "net-hyperledger-kyd",
+				Name:          "Hyperledger Fabric KYD",
+				Status:        "active",
+				Height:        5678,
+				PeerCount:     4,
+				LastBlockTime: time.Now().Add(-2 * time.Second).Format(time.RFC3339),
+				Channel:       "kyd-channel",
+			},
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{"networks": networks})
+	}).Methods("GET")
+
+	admin.HandleFunc("/blockchain/transactions", func(w http.ResponseWriter, r *http.Request) {
+		ut, _ := middleware.UserTypeFromContext(r.Context())
+		if ut != "admin" {
+			w.WriteHeader(http.StatusForbidden)
+			w.Write([]byte(`{"error":"admin access required"}`))
+			return
+		}
+		limit := 50
+		offset := 0
+		if v := r.URL.Query().Get("limit"); v != "" {
+			if n, err := strconv.Atoi(v); err == nil && n > 0 {
+				limit = n
+			}
+		}
+		if v := r.URL.Query().Get("offset"); v != "" {
+			if n, err := strconv.Atoi(v); err == nil && n >= 0 {
+				offset = n
+			}
+		}
+
+		txs, err := txRepo.FindAll(r.Context(), limit, offset)
+		if err != nil {
+			log.Error("Failed to fetch blockchain transactions", map[string]interface{}{"error": err.Error()})
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		total, _ := txRepo.CountAll(r.Context())
+
+		type BlockchainTransaction struct {
+			TxID        uuid.UUID `json:"tx_id"`
+			BlockNumber int       `json:"block_number,omitempty"`
+			Status      string    `json:"status"`
+			Timestamp   time.Time `json:"timestamp"`
+			Channel     string    `json:"channel,omitempty"`
+			Chaincode   string    `json:"chaincode,omitempty"`
+		}
+
+		bTxs := make([]BlockchainTransaction, len(txs))
+		for i, tx := range txs {
+			bTxs[i] = BlockchainTransaction{
+				TxID:      tx.ID,
+				Status:    string(tx.Status),
+				Timestamp: tx.CreatedAt,
+				Channel:   "kyd-channel",
+			}
+			if tx.BlockchainTxHash != nil {
+				// Mock block number for display
+				bTxs[i].BlockNumber = 1000 + i
+			}
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{"transactions": bTxs, "total": total})
+	}).Methods("GET")
+
+	admin.HandleFunc("/analytics/metrics", func(w http.ResponseWriter, r *http.Request) {
+		ut, _ := middleware.UserTypeFromContext(r.Context())
+		if ut != "admin" {
+			w.WriteHeader(http.StatusForbidden)
+			w.Write([]byte(`{"error":"admin access required"}`))
+			return
+		}
+
+		userCount, _ := userRepo.CountAll(r.Context())
+		txCount, _ := txRepo.CountAll(r.Context())
+		volume, _ := txRepo.SumVolume(r.Context())
+		earnings, _ := txRepo.SumEarnings(r.Context())
+		failedTx, _ := txRepo.CountByStatus(r.Context(), domain.TransactionStatusFailed)
+		pendingTx, _ := txRepo.CountByStatus(r.Context(), domain.TransactionStatusPending)
+
+		type SystemMetrics struct {
+			TotalUsers          int     `json:"total_users"`
+			ActiveUsers         int     `json:"active_users"` // Mocked same as total for now
+			TotalTransactions   int     `json:"total_transactions"`
+			TotalVolume         float64 `json:"total_volume"`
+			TotalEarnings       float64 `json:"total_earnings"`
+			FailedTransactions  int     `json:"failed_transactions"`
+			PendingTransactions int     `json:"pending_transactions"`
+			LastUpdated         string  `json:"last_updated"`
+		}
+
+		metrics := SystemMetrics{
+			TotalUsers:          userCount,
+			ActiveUsers:         userCount,
+			TotalTransactions:   txCount,
+			TotalVolume:         volume.InexactFloat64(),
+			TotalEarnings:       earnings.InexactFloat64(),
+			FailedTransactions:  failedTx,
+			PendingTransactions: pendingTx,
+			LastUpdated:         time.Now().Format(time.RFC3339),
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(metrics)
+	}).Methods("GET")
+
+	admin.HandleFunc("/analytics/earnings", func(w http.ResponseWriter, r *http.Request) {
+		ut, _ := middleware.UserTypeFromContext(r.Context())
+		if ut != "admin" {
+			w.WriteHeader(http.StatusForbidden)
+			w.Write([]byte(`{"error":"admin access required"}`))
+			return
+		}
+
+		earnings, _ := txRepo.SumEarnings(r.Context())
+		txCount, _ := txRepo.CountAll(r.Context())
+
+		avg := 0.0
+		if txCount > 0 {
+			avg = earnings.InexactFloat64() / float64(txCount)
+		}
+
+		type EarningsReport struct {
+			Period                        string  `json:"period"`
+			TotalEarnings                 float64 `json:"total_earnings"`
+			TransactionCount              int     `json:"transaction_count"`
+			AverageEarningsPerTransaction float64 `json:"average_earnings_per_transaction"`
+			Currency                      string  `json:"currency"`
+		}
+
+		// Return a single "All Time" report for now
+		report := EarningsReport{
+			Period:                        "All Time",
+			TotalEarnings:                 earnings.InexactFloat64(),
+			TransactionCount:              txCount,
+			AverageEarningsPerTransaction: avg,
+			Currency:                      "MWK",
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{"reports": []EarningsReport{report}})
+	}).Methods("GET")
+
+	admin.HandleFunc("/compliance/kyc", func(w http.ResponseWriter, r *http.Request) {
+		ut, _ := middleware.UserTypeFromContext(r.Context())
+		if ut != "admin" {
+			w.WriteHeader(http.StatusForbidden)
+			w.Write([]byte(`{"error":"admin access required"}`))
+			return
+		}
+		status := r.URL.Query().Get("status")
+		limit := 50
+		offset := 0
+		// Parsing limit/offset omitted for brevity, using defaults if err
+
+		var users []*domain.User
+		var total int
+		var err error
+
+		if status != "" {
+			users, total, err = userRepo.FindByKYCStatus(r.Context(), status, limit, offset)
+		} else {
+			users, err = userRepo.FindAll(r.Context(), limit, offset)
+			total, _ = userRepo.CountAll(r.Context())
+		}
+
+		if err != nil {
+			log.Error("Failed to fetch kyc applications", map[string]interface{}{"error": err.Error()})
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+
+		type KYCApplication struct {
+			ID          string    `json:"id"` // Using User ID as Application ID
+			UserID      uuid.UUID `json:"user_id"`
+			Status      string    `json:"status"`
+			SubmittedAt time.Time `json:"submitted_at"`
+		}
+
+		apps := make([]KYCApplication, len(users))
+		for i, u := range users {
+			apps[i] = KYCApplication{
+				ID:          u.ID.String(),
+				UserID:      u.ID,
+				Status:      string(u.KYCStatus),
+				SubmittedAt: u.CreatedAt, // Mock submitted time as created time
+			}
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{"applications": apps, "total": total})
+	}).Methods("GET")
+
+	admin.HandleFunc("/compliance/kyc/{id}/status", func(w http.ResponseWriter, r *http.Request) {
+		ut, _ := middleware.UserTypeFromContext(r.Context())
+		if ut != "admin" {
+			w.WriteHeader(http.StatusForbidden)
+			w.Write([]byte(`{"error":"admin access required"}`))
+			return
+		}
+		vars := mux.Vars(r)
+		id, err := uuid.Parse(vars["id"])
+		if err != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+
+		var req struct {
+			Status string `json:"status"`
+			Reason string `json:"reason"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+
+		user, err := userRepo.FindByID(r.Context(), id)
+		if err != nil {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+
+		user.KYCStatus = domain.KYCStatus(req.Status)
+		if err := userRepo.Update(r.Context(), user); err != nil {
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+
+		// Log audit
+		entityType := "user"
+		newVals := domain.Metadata{"status": req.Status, "reason": req.Reason}
+		auditRepo.Create(r.Context(), &domain.AuditLog{
+			UserID:     &id,
+			Action:     "KYC_UPDATE",
+			EntityType: &entityType,
+			EntityID:   &id,
+			NewValues:  &newVals,
+		})
+
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"message":"status updated"}`))
+	}).Methods("PATCH")
+
+	// User KYC Status Update (Direct User Endpoint)
+	admin.HandleFunc("/users/{id}/kyc", func(w http.ResponseWriter, r *http.Request) {
+		ut, _ := middleware.UserTypeFromContext(r.Context())
+		if ut != "admin" {
+			w.WriteHeader(http.StatusForbidden)
+			w.Write([]byte(`{"error":"admin access required"}`))
+			return
+		}
+		vars := mux.Vars(r)
+		id, err := uuid.Parse(vars["id"])
+		if err != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+
+		var req struct {
+			KYCStatus string `json:"kyc_status"`
+			Reason    string `json:"reason"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+
+		user, err := userRepo.FindByID(r.Context(), id)
+		if err != nil {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+
+		user.KYCStatus = domain.KYCStatus(req.KYCStatus)
+		if err := userRepo.Update(r.Context(), user); err != nil {
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+
+		// Log audit
+		entityType := "user"
+		newVals := domain.Metadata{"status": req.KYCStatus, "reason": req.Reason}
+		auditRepo.Create(r.Context(), &domain.AuditLog{
+			UserID:     &id,
+			Action:     "KYC_UPDATE",
+			EntityType: &entityType,
+			EntityID:   &id,
+			NewValues:  &newVals,
+		})
+
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"message":"kyc status updated"}`))
+	}).Methods("PATCH")
+
+	// User Role Update
+	admin.HandleFunc("/users/{id}/role", func(w http.ResponseWriter, r *http.Request) {
+		ut, _ := middleware.UserTypeFromContext(r.Context())
+		if ut != "admin" {
+			w.WriteHeader(http.StatusForbidden)
+			w.Write([]byte(`{"error":"admin access required"}`))
+			return
+		}
+		vars := mux.Vars(r)
+		id, err := uuid.Parse(vars["id"])
+		if err != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+
+		var req struct {
+			UserType string `json:"user_type"`
+			Reason   string `json:"reason"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+
+		user, err := userRepo.FindByID(r.Context(), id)
+		if err != nil {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+
+		user.UserType = domain.UserType(req.UserType)
+		if err := userRepo.Update(r.Context(), user); err != nil {
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+
+		// Log audit
+		entityType := "user"
+		newVals := domain.Metadata{"user_type": req.UserType, "reason": req.Reason}
+		auditRepo.Create(r.Context(), &domain.AuditLog{
+			UserID:     &id,
+			Action:     "ROLE_UPDATE",
+			EntityType: &entityType,
+			EntityID:   &id,
+			NewValues:  &newVals,
+		})
+
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"message":"user role updated"}`))
+	}).Methods("PATCH")
+
+	// General User Profile Update (Admin)
+	admin.HandleFunc("/users/{id}", func(w http.ResponseWriter, r *http.Request) {
+		ut, _ := middleware.UserTypeFromContext(r.Context())
+		if ut != "admin" {
+			w.WriteHeader(http.StatusForbidden)
+			w.Write([]byte(`{"error":"admin access required"}`))
+			return
+		}
+		vars := mux.Vars(r)
+		id, err := uuid.Parse(vars["id"])
+		if err != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+
+		var req struct {
+			FirstName   string `json:"first_name"`
+			LastName    string `json:"last_name"`
+			Email       string `json:"email"`
+			Phone       string `json:"phone"`
+			CountryCode string `json:"country_code"`
+			Password    string `json:"password"` // Optional
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+
+		user, err := userRepo.FindByID(r.Context(), id)
+		if err != nil {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+
+		// Update fields if provided
+		if req.FirstName != "" {
+			user.FirstName = req.FirstName
+		}
+		if req.LastName != "" {
+			user.LastName = req.LastName
+		}
+		if req.Email != "" {
+			user.Email = req.Email
+		}
+		if req.Phone != "" {
+			user.Phone = req.Phone
+		}
+		if req.CountryCode != "" {
+			user.CountryCode = req.CountryCode
+		}
+		if req.Password != "" {
+			hashed, err := bcrypt.GenerateFromPassword([]byte(req.Password), bcrypt.DefaultCost)
+			if err != nil {
+				w.WriteHeader(http.StatusInternalServerError)
+				return
+			}
+			user.PasswordHash = string(hashed)
+		}
+
+		user.UpdatedAt = time.Now()
+
+		if err := userRepo.Update(r.Context(), user); err != nil {
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+
+		// Log audit
+		entityType := "user"
+		newVals := domain.Metadata{
+			"first_name": req.FirstName,
+			"last_name":  req.LastName,
+			"email":      req.Email,
+			"phone":      req.Phone,
+			"country":    req.CountryCode,
+			"password":   "*****", // masked
+		}
+		auditRepo.Create(r.Context(), &domain.AuditLog{
+			UserID:     &id,
+			Action:     "PROFILE_UPDATE",
+			EntityType: &entityType,
+			EntityID:   &id,
+			NewValues:  &newVals,
+		})
+
+		w.Header().Set("Content-Type", "application/json")
+		w.Write([]byte(`{"message":"profile updated"}`))
+	}).Methods("PATCH")
+
+	// User Activity
+	admin.HandleFunc("/users/{id}/activity", func(w http.ResponseWriter, r *http.Request) {
+		ut, _ := middleware.UserTypeFromContext(r.Context())
+		if ut != "admin" {
+			w.WriteHeader(http.StatusForbidden)
+			w.Write([]byte(`{"error":"admin access required"}`))
+			return
+		}
+		vars := mux.Vars(r)
+		id, err := uuid.Parse(vars["id"])
+		if err != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+
+		limit := 50
+		offset := 0
+		if v := r.URL.Query().Get("limit"); v != "" {
+			if n, err := strconv.Atoi(v); err == nil && n > 0 {
+				limit = n
+			}
+		}
+		if v := r.URL.Query().Get("offset"); v != "" {
+			if n, err := strconv.Atoi(v); err == nil && n >= 0 {
+				offset = n
+			}
+		}
+
+		logs, err := auditRepo.FindByUserID(r.Context(), id, limit, offset)
+		if err != nil {
+			log.Error("Failed to fetch user activity", map[string]interface{}{"error": err.Error()})
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+
+		// Format logs for UI
+		type ActivityLog struct {
+			ID        uuid.UUID `json:"id"`
+			Action    string    `json:"action"`
+			Timestamp time.Time `json:"timestamp"`
+			Details   string    `json:"details,omitempty"`
+		}
+
+		uiLogs := make([]ActivityLog, len(logs))
+		for i, l := range logs {
+			details := ""
+			if l.NewValues != nil {
+				if reason, ok := (*l.NewValues)["reason"].(string); ok {
+					details = reason
+				}
+			}
+			uiLogs[i] = ActivityLog{
+				ID:        l.ID,
+				Action:    l.Action,
+				Timestamp: l.CreatedAt,
+				Details:   details,
+			}
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{"logs": uiLogs, "total": len(uiLogs)}) // Total logic requires CountByUserID if needed
+	}).Methods("GET")
+
+	// User Profile Update
+	// Get All Users
+	admin.HandleFunc("/users", func(w http.ResponseWriter, r *http.Request) {
+		ut, _ := middleware.UserTypeFromContext(r.Context())
+		if ut != "admin" {
+			w.WriteHeader(http.StatusForbidden)
+			w.Write([]byte(`{"error":"admin access required"}`))
+			return
+		}
+		limit := 50
+		offset := 0
+		if v := r.URL.Query().Get("limit"); v != "" {
+			if n, err := strconv.Atoi(v); err == nil && n > 0 {
+				limit = n
+			}
+		}
+		if v := r.URL.Query().Get("offset"); v != "" {
+			if n, err := strconv.Atoi(v); err == nil && n >= 0 {
+				offset = n
+			}
+		}
+
+		users, err := userRepo.FindAll(r.Context(), limit, offset)
+		if err != nil {
+			log.Error("Failed to fetch users", map[string]interface{}{"error": err.Error()})
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		total, _ := userRepo.CountAll(r.Context())
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{"users": users, "total": total})
+	}).Methods("GET")
+
+	// Banking Endpoints
+	admin.HandleFunc("/banking/accounts", func(w http.ResponseWriter, r *http.Request) {
+		ut, _ := middleware.UserTypeFromContext(r.Context())
+		if ut != "admin" {
+			w.WriteHeader(http.StatusForbidden)
+			return
+		}
+		// Mock Data
+		accounts := []map[string]interface{}{
+			{
+				"id": "ba-001", "bank_name": "Standard Bank", "account_number": "****1234",
+				"account_holder": "VaultString Ltd", "currency": "MWK", "balance": 5000000.00,
+				"status": "active", "connected_at": time.Now().Add(-2400 * time.Hour),
+			},
+			{
+				"id": "ba-002", "bank_name": "NBS Bank", "account_number": "****5678",
+				"account_holder": "VaultString Ops", "currency": "MWK", "balance": 1250000.50,
+				"status": "active", "connected_at": time.Now().Add(-1200 * time.Hour),
+			},
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{"accounts": accounts})
+	}).Methods("GET")
+
+	admin.HandleFunc("/banking/gateways", func(w http.ResponseWriter, r *http.Request) {
+		ut, _ := middleware.UserTypeFromContext(r.Context())
+		if ut != "admin" {
+			w.WriteHeader(http.StatusForbidden)
+			return
+		}
+		// Mock Data
+		gateways := []map[string]interface{}{
+			{
+				"id": "pg-001", "name": "Airtel Money", "provider": "airtel",
+				"status": "active", "last_sync": time.Now().Format(time.RFC3339),
+			},
+			{
+				"id": "pg-002", "name": "Mpamba", "provider": "tnm",
+				"status": "active", "last_sync": time.Now().Add(-5 * time.Minute).Format(time.RFC3339),
+			},
+		}
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{"gateways": gateways})
+	}).Methods("GET")
+
+	admin.HandleFunc("/banking/settlements", func(w http.ResponseWriter, r *http.Request) {
+		ut, _ := middleware.UserTypeFromContext(r.Context())
+		if ut != "admin" {
+			w.WriteHeader(http.StatusForbidden)
+			return
+		}
+		limit := 50
+		offset := 0
+		if v := r.URL.Query().Get("limit"); v != "" {
+			n, _ := strconv.Atoi(v)
+			if n > 0 {
+				limit = n
+			}
+		}
+		if v := r.URL.Query().Get("offset"); v != "" {
+			n, _ := strconv.Atoi(v)
+			if n >= 0 {
+				offset = n
+			}
+		}
+
+		settlements, err := settlementRepo.FindAll(r.Context(), limit, offset)
+		if err != nil {
+			log.Error("Failed to fetch settlements", map[string]interface{}{"error": err.Error()})
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+		total, _ := settlementRepo.CountAll(r.Context())
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{"settlements": settlements, "total": total})
+	}).Methods("GET")
+
+	admin.HandleFunc("/compliance/reports", func(w http.ResponseWriter, r *http.Request) {
+		ut, _ := middleware.UserTypeFromContext(r.Context())
+		if ut != "admin" {
+			w.WriteHeader(http.StatusForbidden)
+			w.Write([]byte(`{"error":"admin access required"}`))
+			return
+		}
+
+		// Mock reports
+		type ComplianceReport struct {
+			ID          string    `json:"id"`
+			ReportType  string    `json:"report_type"`
+			Period      string    `json:"period"`
+			GeneratedAt time.Time `json:"generated_at"`
+			Status      string    `json:"status"`
+		}
+
+		reports := []ComplianceReport{
+			{ID: "rep-001", ReportType: "AML_DAILY", Period: "2024-01-24", GeneratedAt: time.Now(), Status: "ready"},
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(map[string]interface{}{"reports": reports, "total": 1})
+	}).Methods("GET")
+
 	admin.HandleFunc("/users/{id}", func(w http.ResponseWriter, r *http.Request) {
 		ut, _ := middleware.UserTypeFromContext(r.Context())
 		if ut != "admin" {
@@ -196,6 +1071,341 @@ func main() {
 		b, _ := json.Marshal(u)
 		w.Write(b)
 	}).Methods("GET")
+
+	// Update KYC Status
+	admin.HandleFunc("/users/{id}/kyc", func(w http.ResponseWriter, r *http.Request) {
+		ut, _ := middleware.UserTypeFromContext(r.Context())
+		if ut != "admin" {
+			w.WriteHeader(http.StatusForbidden)
+			w.Write([]byte(`{"error":"admin access required"}`))
+			return
+		}
+		vars := mux.Vars(r)
+		id, err := uuid.Parse(vars["id"])
+		if err != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			w.Write([]byte(`{"error":"invalid user id"}`))
+			return
+		}
+
+		var req struct {
+			Status domain.KYCStatus `json:"kyc_status"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+
+		u, err := userRepo.FindByID(r.Context(), id)
+		if err != nil {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+
+		u.KYCStatus = req.Status
+		u.UpdatedAt = time.Now()
+
+		if err := userRepo.Update(r.Context(), u); err != nil {
+			w.WriteHeader(http.StatusInternalServerError)
+			w.Write([]byte(`{"error":"failed to update kyc status"}`))
+			return
+		}
+
+		// Log audit
+		entityType := "user"
+		auditRepo.Create(r.Context(), &domain.AuditLog{
+			ID:         uuid.New(),
+			UserID:     &id, // Subject
+			Action:     "UPDATE_KYC",
+			EntityType: &entityType,
+			EntityID:   &id,
+			CreatedAt:  time.Now(),
+		})
+
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		json.NewEncoder(w).Encode(u)
+	}).Methods("PATCH")
+
+	// Delete User
+	admin.HandleFunc("/users/{id}", func(w http.ResponseWriter, r *http.Request) {
+		ut, _ := middleware.UserTypeFromContext(r.Context())
+		if ut != "admin" {
+			w.WriteHeader(http.StatusForbidden)
+			w.Write([]byte(`{"error":"admin access required"}`))
+			return
+		}
+		vars := mux.Vars(r)
+		id, err := uuid.Parse(vars["id"])
+		if err != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			w.Write([]byte(`{"error":"invalid user id"}`))
+			return
+		}
+
+		u, err := userRepo.FindByID(r.Context(), id)
+		if err != nil {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+
+		u.IsActive = false
+		u.UpdatedAt = time.Now()
+
+		if err := userRepo.Update(r.Context(), u); err != nil {
+			w.WriteHeader(http.StatusInternalServerError)
+			w.Write([]byte(`{"error":"failed to delete user"}`))
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"message":"user deleted successfully"}`))
+	}).Methods("DELETE")
+
+	// Update User Status
+	admin.HandleFunc("/users/{id}/status", func(w http.ResponseWriter, r *http.Request) {
+		ut, _ := middleware.UserTypeFromContext(r.Context())
+		if ut != "admin" {
+			w.WriteHeader(http.StatusForbidden)
+			w.Write([]byte(`{"error":"admin access required"}`))
+			return
+		}
+		vars := mux.Vars(r)
+		id, err := uuid.Parse(vars["id"])
+		if err != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			w.Write([]byte(`{"error":"invalid user id"}`))
+			return
+		}
+
+		var req struct {
+			IsActive bool   `json:"is_active"`
+			Reason   string `json:"reason"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+
+		u, err := userRepo.FindByID(r.Context(), id)
+		if err != nil {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+
+		u.IsActive = req.IsActive
+		u.UpdatedAt = time.Now()
+
+		if err := userRepo.Update(r.Context(), u); err != nil {
+			w.WriteHeader(http.StatusInternalServerError)
+			w.Write([]byte(`{"error":"failed to update user status"}`))
+			return
+		}
+
+		// Audit log
+		action := "DEACTIVATE_USER"
+		if req.IsActive {
+			action = "ACTIVATE_USER"
+		}
+		entityType := "user"
+		auditRepo.Create(r.Context(), &domain.AuditLog{
+			ID:         uuid.New(),
+			UserID:     &id,
+			Action:     action,
+			EntityType: &entityType,
+			EntityID:   &id,
+			CreatedAt:  time.Now(),
+		})
+
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"message":"user status updated"}`))
+	}).Methods("PATCH")
+
+	// Get User Audit Logs
+	admin.HandleFunc("/users/{id}/activity", func(w http.ResponseWriter, r *http.Request) {
+		ut, _ := middleware.UserTypeFromContext(r.Context())
+		if ut != "admin" {
+			w.WriteHeader(http.StatusForbidden)
+			w.Write([]byte(`{"error":"admin access required"}`))
+			return
+		}
+		vars := mux.Vars(r)
+		id, err := uuid.Parse(vars["id"])
+		if err != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			w.Write([]byte(`{"error":"invalid user id"}`))
+			return
+		}
+
+		logs, err := auditRepo.FindByUserID(r.Context(), id, 100, 0)
+		if err != nil {
+			w.WriteHeader(http.StatusInternalServerError)
+			w.Write([]byte(`{"error":"failed to fetch audit logs"}`))
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		type Resp struct {
+			Logs []*domain.AuditLog `json:"logs"`
+		}
+		json.NewEncoder(w).Encode(Resp{Logs: logs})
+	}).Methods("GET")
+
+	// Get All Audit Logs
+	admin.HandleFunc("/audit/logs", func(w http.ResponseWriter, r *http.Request) {
+		ut, _ := middleware.UserTypeFromContext(r.Context())
+		if ut != "admin" {
+			w.WriteHeader(http.StatusForbidden)
+			w.Write([]byte(`{"error":"admin access required"}`))
+			return
+		}
+		limit := 100
+		offset := 0
+		if v := r.URL.Query().Get("limit"); v != "" {
+			if n, err := strconv.Atoi(v); err == nil && n > 0 {
+				limit = n
+			}
+		}
+		if v := r.URL.Query().Get("offset"); v != "" {
+			if n, err := strconv.Atoi(v); err == nil && n >= 0 {
+				offset = n
+			}
+		}
+
+		logs, err := auditRepo.FindAll(r.Context(), limit, offset)
+		if err != nil {
+			w.WriteHeader(http.StatusInternalServerError)
+			w.Write([]byte(`{"error":"failed to fetch audit logs"}`))
+			return
+		}
+		total, _ := auditRepo.CountAll(r.Context())
+
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		type Resp struct {
+			Logs  []*domain.AuditLog `json:"logs"`
+			Total int                `json:"total"`
+		}
+		json.NewEncoder(w).Encode(Resp{Logs: logs, Total: total})
+	}).Methods("GET")
+
+	// Flag Transaction
+	admin.HandleFunc("/transactions/{id}/flag", func(w http.ResponseWriter, r *http.Request) {
+		ut, _ := middleware.UserTypeFromContext(r.Context())
+		if ut != "admin" {
+			w.WriteHeader(http.StatusForbidden)
+			w.Write([]byte(`{"error":"admin access required"}`))
+			return
+		}
+		vars := mux.Vars(r)
+		id, err := uuid.Parse(vars["id"])
+		if err != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			w.Write([]byte(`{"error":"invalid transaction id"}`))
+			return
+		}
+
+		var req struct {
+			Reason string `json:"reason"`
+		}
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			return
+		}
+
+		if err := txRepo.Flag(r.Context(), id, req.Reason); err != nil {
+			w.WriteHeader(http.StatusInternalServerError)
+			w.Write([]byte(`{"error":"failed to flag transaction"}`))
+			return
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte(`{"message":"transaction flagged"}`))
+	}).Methods("POST")
+
+	// Fix Wallet Addresses
+	admin.HandleFunc("/wallets/fix-addresses", func(w http.ResponseWriter, r *http.Request) {
+		ut, _ := middleware.UserTypeFromContext(r.Context())
+		if ut != "admin" {
+			w.WriteHeader(http.StatusForbidden)
+			w.Write([]byte(`{"error":"admin access required"}`))
+			return
+		}
+
+		// Fetch all wallets (limit 10000 for safety)
+		wallets, err := walletRepo.FindAll(r.Context(), 10000, 0)
+		if err != nil {
+			w.WriteHeader(http.StatusInternalServerError)
+			w.Write([]byte(`{"error":"failed to fetch wallets"}`))
+			return
+		}
+
+		count := 0
+		for _, w := range wallets {
+			addr := ""
+			if w.WalletAddress != nil {
+				addr = *w.WalletAddress
+			}
+
+			// Check if address is valid 16-digit number
+			isValid := false
+			if len(addr) == 16 {
+				_, err := strconv.ParseInt(addr, 10, 64)
+				if err == nil {
+					isValid = true
+				}
+			}
+
+			if !isValid {
+				// Generate new number
+				n, err := rand.Int(rand.Reader, big.NewInt(10000000000000000))
+				if err != nil {
+					continue
+				}
+				newAddr := fmt.Sprintf("%016d", n)
+
+				if err := walletRepo.UpdateWalletAddress(r.Context(), w.ID, newAddr); err == nil {
+					count++
+				}
+			}
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		json.NewEncoder(w).Encode(map[string]interface{}{"message": fmt.Sprintf("Updated %d wallets", count)})
+	}).Methods("POST")
+
+	// Compliance Reports (Mock)
+	admin.HandleFunc("/compliance/reports", func(w http.ResponseWriter, r *http.Request) {
+		ut, _ := middleware.UserTypeFromContext(r.Context())
+		if ut != "admin" {
+			w.WriteHeader(http.StatusForbidden)
+			w.Write([]byte(`{"error":"admin access required"}`))
+			return
+		}
+
+		// Mock reports
+		type Report struct {
+			ID          string    `json:"id"`
+			Type        string    `json:"type"`
+			Status      string    `json:"status"`
+			GeneratedAt time.Time `json:"generated_at"`
+			URL         string    `json:"url"`
+		}
+		reports := []Report{
+			{ID: "rep-001", Type: "AML", Status: "completed", GeneratedAt: time.Now().Add(-24 * time.Hour), URL: "#"},
+			{ID: "rep-002", Type: "KYC", Status: "pending", GeneratedAt: time.Now(), URL: "#"},
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		json.NewEncoder(w).Encode(map[string]interface{}{"reports": reports})
+	}).Methods("GET")
+
 	admin.HandleFunc("/transactions", func(w http.ResponseWriter, r *http.Request) {
 		ut, _ := middleware.UserTypeFromContext(r.Context())
 		if ut != "admin" {
@@ -225,29 +1435,34 @@ func main() {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
 		type AdminTx struct {
-			ID               uuid.UUID                `json:"id"`
-			TransactionID    *uuid.UUID               `json:"transaction_id,omitempty"`
-			SenderID         uuid.UUID                `json:"sender_id"`
-			ReceiverID       uuid.UUID                `json:"receiver_id"`
-			SenderUserType   domain.UserType          `json:"sender_user_type"`
-			ReceiverUserType domain.UserType          `json:"receiver_user_type"`
-			SenderName       *string                  `json:"sender_name,omitempty"`
-			SenderEmail      *string                  `json:"sender_email,omitempty"`
-			ReceiverName     *string                  `json:"receiver_name,omitempty"`
-			ReceiverEmail    *string                  `json:"receiver_email,omitempty"`
-			Amount           domain.Money             `json:"amount"`
-			Fee              domain.Money             `json:"fee"`
-			NetAmount        domain.Money             `json:"net_amount"`
-			Status           domain.TransactionStatus `json:"status"`
-			TransactionType  domain.TransactionType   `json:"transaction_type"`
-			StatusReason     *string                  `json:"status_reason,omitempty"`
-			Reference        string                   `json:"reference"`
-			CreatedAt        time.Time                `json:"created_at"`
-			UpdatedAt        time.Time                `json:"updated_at"`
-			Flagged          bool                     `json:"flagged"`
+			ID                   uuid.UUID                `json:"id"`
+			TransactionID        *uuid.UUID               `json:"transaction_id,omitempty"`
+			SenderID             uuid.UUID                `json:"sender_id"`
+			ReceiverID           uuid.UUID                `json:"receiver_id"`
+			SenderUserType       domain.UserType          `json:"sender_user_type"`
+			ReceiverUserType     domain.UserType          `json:"receiver_user_type"`
+			SenderName           *string                  `json:"sender_name,omitempty"`
+			SenderEmail          *string                  `json:"sender_email,omitempty"`
+			SenderWalletNumber   *string                  `json:"sender_wallet_number,omitempty"`
+			ReceiverName         *string                  `json:"receiver_name,omitempty"`
+			ReceiverEmail        *string                  `json:"receiver_email,omitempty"`
+			ReceiverWalletNumber *string                  `json:"receiver_wallet_number,omitempty"`
+			Amount               domain.Money             `json:"amount"`
+			Fee                  domain.Money             `json:"fee"`
+			NetAmount            domain.Money             `json:"net_amount"`
+			Status               domain.TransactionStatus `json:"status"`
+			TransactionType      domain.TransactionType   `json:"transaction_type"`
+			StatusReason         *string                  `json:"status_reason,omitempty"`
+			Reference            string                   `json:"reference"`
+			CreatedAt            time.Time                `json:"created_at"`
+			UpdatedAt            time.Time                `json:"updated_at"`
+			Flagged              bool                     `json:"flagged"`
 		}
 		ids := make([]uuid.UUID, 0, len(txs)*2)
 		idSeen := make(map[uuid.UUID]struct{})
+		walletIDs := make([]uuid.UUID, 0, len(txs)*2)
+		walletSeen := make(map[uuid.UUID]struct{})
+
 		for _, t := range txs {
 			if _, ok := idSeen[t.SenderID]; !ok {
 				ids = append(ids, t.SenderID)
@@ -257,12 +1472,27 @@ func main() {
 				ids = append(ids, t.ReceiverID)
 				idSeen[t.ReceiverID] = struct{}{}
 			}
+			if _, ok := walletSeen[t.SenderWalletID]; !ok {
+				walletIDs = append(walletIDs, t.SenderWalletID)
+				walletSeen[t.SenderWalletID] = struct{}{}
+			}
+			if _, ok := walletSeen[t.ReceiverWalletID]; !ok {
+				walletIDs = append(walletIDs, t.ReceiverWalletID)
+				walletSeen[t.ReceiverWalletID] = struct{}{}
+			}
 		}
 		users, _ := userRepo.FindByIDs(r.Context(), ids)
 		userMap := make(map[uuid.UUID]*domain.User, len(users))
 		for _, u := range users {
 			userMap[u.ID] = u
 		}
+
+		wallets, _ := walletRepo.FindByIDs(r.Context(), walletIDs)
+		walletMap := make(map[uuid.UUID]*domain.Wallet, len(wallets))
+		for _, w := range wallets {
+			walletMap[w.ID] = w
+		}
+
 		out := make([]AdminTx, 0, len(txs))
 		for _, t := range txs {
 			var sender *domain.User = userMap[t.SenderID]
@@ -273,6 +1503,9 @@ func main() {
 			var rEmail *string
 			var sType domain.UserType
 			var rType domain.UserType
+			var sWalletNum *string
+			var rWalletNum *string
+
 			if sender != nil {
 				name := sender.FirstName + " " + sender.LastName
 				sName = &name
@@ -287,29 +1520,47 @@ func main() {
 				rEmail = &email
 				rType = receiver.UserType
 			}
+
+			if w, ok := walletMap[t.SenderWalletID]; ok {
+				sWalletNum = w.WalletAddress
+			}
+			if w, ok := walletMap[t.ReceiverWalletID]; ok {
+				rWalletNum = w.WalletAddress
+			}
+
 			amt := domain.Money{Amount: t.Amount, Currency: t.Currency}
 			fee := domain.Money{Amount: t.FeeAmount, Currency: t.FeeCurrency}
 			net := domain.Money{Amount: t.NetAmount, Currency: t.ConvertedCurrency}
+
+			flagged := false
+			if val, ok := t.Metadata["flagged"]; ok {
+				if b, ok := val.(bool); ok {
+					flagged = b
+				}
+			}
+
 			out = append(out, AdminTx{
-				ID:               t.ID,
-				SenderID:         t.SenderID,
-				ReceiverID:       t.ReceiverID,
-				SenderUserType:   sType,
-				ReceiverUserType: rType,
-				SenderName:       sName,
-				SenderEmail:      sEmail,
-				ReceiverName:     rName,
-				ReceiverEmail:    rEmail,
-				Amount:           amt,
-				Fee:              fee,
-				NetAmount:        net,
-				Status:           t.Status,
-				TransactionType:  t.TransactionType,
-				StatusReason:     t.StatusReason,
-				Reference:        t.Reference,
-				CreatedAt:        t.CreatedAt,
-				UpdatedAt:        t.UpdatedAt,
-				Flagged:          t.Status == domain.TransactionStatusFailed,
+				ID:                   t.ID,
+				SenderID:             t.SenderID,
+				ReceiverID:           t.ReceiverID,
+				SenderUserType:       sType,
+				ReceiverUserType:     rType,
+				SenderName:           sName,
+				SenderEmail:          sEmail,
+				SenderWalletNumber:   sWalletNum,
+				ReceiverName:         rName,
+				ReceiverEmail:        rEmail,
+				ReceiverWalletNumber: rWalletNum,
+				Amount:               amt,
+				Fee:                  fee,
+				NetAmount:            net,
+				Status:               t.Status,
+				TransactionType:      t.TransactionType,
+				StatusReason:         t.StatusReason,
+				Reference:            t.Reference,
+				CreatedAt:            t.CreatedAt,
+				UpdatedAt:            t.UpdatedAt,
+				Flagged:              flagged,
 			})
 		}
 		type Resp struct {
@@ -321,6 +1572,129 @@ func main() {
 		b, _ := json.Marshal(Resp{Transactions: out, Total: total, Limit: limit, Offset: offset})
 		w.Write(b)
 	}).Methods("GET")
+
+	// Get Transaction By ID
+	admin.HandleFunc("/transactions/{id}", func(w http.ResponseWriter, r *http.Request) {
+		ut, _ := middleware.UserTypeFromContext(r.Context())
+		if ut != "admin" {
+			w.WriteHeader(http.StatusForbidden)
+			w.Write([]byte(`{"error":"admin access required"}`))
+			return
+		}
+		vars := mux.Vars(r)
+		id, err := uuid.Parse(vars["id"])
+		if err != nil {
+			w.WriteHeader(http.StatusBadRequest)
+			w.Write([]byte(`{"error":"invalid transaction id"}`))
+			return
+		}
+
+		t, err := txRepo.FindByID(r.Context(), id)
+		if err != nil {
+			w.WriteHeader(http.StatusNotFound)
+			return
+		}
+
+		// Enrich with User/Wallet info
+		var sName, sEmail, rName, rEmail, sWalletNum, rWalletNum *string
+		var sType, rType domain.UserType
+
+		sender, _ := userRepo.FindByID(r.Context(), t.SenderID)
+		if sender != nil {
+			name := sender.FirstName + " " + sender.LastName
+			sName = &name
+			email := sender.Email
+			sEmail = &email
+			sType = sender.UserType
+		}
+
+		receiver, _ := userRepo.FindByID(r.Context(), t.ReceiverID)
+		if receiver != nil {
+			name := receiver.FirstName + " " + receiver.LastName
+			rName = &name
+			email := receiver.Email
+			rEmail = &email
+			rType = receiver.UserType
+		}
+
+		sWallet, _ := walletRepo.FindByID(r.Context(), t.SenderWalletID)
+		if sWallet != nil {
+			sWalletNum = sWallet.WalletAddress
+		}
+
+		rWallet, _ := walletRepo.FindByID(r.Context(), t.ReceiverWalletID)
+		if rWallet != nil {
+			rWalletNum = rWallet.WalletAddress
+		}
+
+		amt := domain.Money{Amount: t.Amount, Currency: t.Currency}
+		fee := domain.Money{Amount: t.FeeAmount, Currency: t.FeeCurrency}
+		net := domain.Money{Amount: t.NetAmount, Currency: t.ConvertedCurrency}
+
+		flagged := false
+		if val, ok := t.Metadata["flagged"]; ok {
+			if b, ok := val.(bool); ok {
+				flagged = b
+			}
+		}
+
+		// Define AdminTx struct locally or reuse?
+		// Reusing struct definition is tricky inside func.
+		// I'll define a response struct.
+		type AdminTx struct {
+			ID                   uuid.UUID                `json:"id"`
+			TransactionID        *uuid.UUID               `json:"transaction_id,omitempty"`
+			SenderID             uuid.UUID                `json:"sender_id"`
+			ReceiverID           uuid.UUID                `json:"receiver_id"`
+			SenderUserType       domain.UserType          `json:"sender_user_type"`
+			ReceiverUserType     domain.UserType          `json:"receiver_user_type"`
+			SenderName           *string                  `json:"sender_name,omitempty"`
+			SenderEmail          *string                  `json:"sender_email,omitempty"`
+			SenderWalletNumber   *string                  `json:"sender_wallet_number,omitempty"`
+			ReceiverName         *string                  `json:"receiver_name,omitempty"`
+			ReceiverEmail        *string                  `json:"receiver_email,omitempty"`
+			ReceiverWalletNumber *string                  `json:"receiver_wallet_number,omitempty"`
+			Amount               domain.Money             `json:"amount"`
+			Fee                  domain.Money             `json:"fee"`
+			NetAmount            domain.Money             `json:"net_amount"`
+			Status               domain.TransactionStatus `json:"status"`
+			TransactionType      domain.TransactionType   `json:"transaction_type"`
+			StatusReason         *string                  `json:"status_reason,omitempty"`
+			Reference            string                   `json:"reference"`
+			CreatedAt            time.Time                `json:"created_at"`
+			UpdatedAt            time.Time                `json:"updated_at"`
+			Flagged              bool                     `json:"flagged"`
+		}
+
+		resp := AdminTx{
+			ID:                   t.ID,
+			SenderID:             t.SenderID,
+			ReceiverID:           t.ReceiverID,
+			SenderUserType:       sType,
+			ReceiverUserType:     rType,
+			SenderName:           sName,
+			SenderEmail:          sEmail,
+			SenderWalletNumber:   sWalletNum,
+			ReceiverName:         rName,
+			ReceiverEmail:        rEmail,
+			ReceiverWalletNumber: rWalletNum,
+			Amount:               amt,
+			Fee:                  fee,
+			NetAmount:            net,
+			Status:               t.Status,
+			TransactionType:      t.TransactionType,
+			StatusReason:         t.StatusReason,
+			Reference:            t.Reference,
+			CreatedAt:            t.CreatedAt,
+			UpdatedAt:            t.UpdatedAt,
+			Flagged:              flagged,
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		w.WriteHeader(http.StatusOK)
+		json.NewEncoder(w).Encode(resp)
+	}).Methods("GET")
+
 	admin.HandleFunc("/banking/settlements", func(w http.ResponseWriter, r *http.Request) {
 		ut, _ := middleware.UserTypeFromContext(r.Context())
 		if ut != "admin" {
@@ -474,46 +1848,66 @@ func main() {
 			Status        domain.WalletStatus `json:"status"`
 			CreatedAt     time.Time           `json:"created_at"`
 		}
-		all := make([]WalletAddr, 0, limit)
-		users, _ := userRepo.FindAll(r.Context(), 1000, 0)
-		for _, u := range users {
-			ws, _ := walletRepo.FindByUserID(r.Context(), u.ID)
-			for _, w := range ws {
-				all = append(all, WalletAddr{
-					ID:            w.ID,
-					UserID:        w.UserID,
-					WalletAddress: w.WalletAddress,
-					Currency:      w.Currency,
-					Status:        w.Status,
-					CreatedAt:     w.CreatedAt,
-				})
+
+		var wallets []*domain.Wallet
+		var total int
+		var err error
+
+		var uidPtr *uuid.UUID
+		userIDStr := r.URL.Query().Get("user_id")
+		if userIDStr != "" {
+			uid, err := uuid.Parse(userIDStr)
+			if err != nil {
+				w.WriteHeader(http.StatusBadRequest)
+				w.Write([]byte(`{"error":"invalid user_id"}`))
+				return
+			}
+			uidPtr = &uid
+		}
+
+		wallets, err = walletRepo.FindAllWithFilter(r.Context(), limit, offset, uidPtr)
+		if err != nil {
+			log.Error("Failed to fetch wallets", map[string]interface{}{"error": err.Error()})
+			w.WriteHeader(http.StatusInternalServerError)
+			return
+		}
+
+		total, err = walletRepo.CountWithFilter(r.Context(), uidPtr)
+		if err != nil {
+			log.Error("Failed to count wallets", map[string]interface{}{"error": err.Error()})
+		}
+
+		addresses := make([]WalletAddr, len(wallets))
+		for i, w := range wallets {
+			addresses[i] = WalletAddr{
+				ID:            w.ID,
+				UserID:        w.UserID,
+				WalletAddress: w.WalletAddress,
+				Currency:      w.Currency,
+				Status:        w.Status,
+				CreatedAt:     w.CreatedAt,
 			}
 		}
-		if offset > len(all) {
-			offset = len(all)
-		}
-		end := offset + limit
-		if end > len(all) {
-			end = len(all)
-		}
-		page := all[offset:end]
+
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
 		type Resp struct {
 			Addresses []WalletAddr `json:"addresses"`
 			Total     int          `json:"total"`
 		}
-		b, _ := json.Marshal(Resp{Addresses: page, Total: len(all)})
+		b, _ := json.Marshal(Resp{Addresses: addresses, Total: total})
 		w.Write(b)
 	}).Methods("GET")
 
 	payments := api.PathPrefix("/payments").Subrouter()
-	payments.Use(idemMW.Require)
+	// payments.Use(idemMW.Require) - Removed redundant middleware (already on api)
 	payments.HandleFunc("/initiate", paymentHandler.InitiatePayment).Methods("POST")
-	payments.HandleFunc("/{id}", paymentHandler.GetTransaction).Methods("GET")
-	payments.HandleFunc("", paymentHandler.GetUserTransactions).Methods("GET")
-	payments.HandleFunc("/{id}/cancel", paymentHandler.CancelPayment).Methods("POST")
-	payments.HandleFunc("/bulk", paymentHandler.BulkPayment).Methods("POST")
+	// payments.HandleFunc("/receiver-info", paymentHandler.GetReceiverInfo).Methods("GET") // Removed, use /wallets/lookup or /wallets/search
+	payments.HandleFunc("/{id}/receipt", paymentHandler.GetReceipt).Methods("GET")
+	payments.HandleFunc("", paymentHandler.GetTransactions).Methods("GET") // Changed GetUserTransactions to GetTransactions
+	// payments.HandleFunc("/{id}", paymentHandler.GetTransaction).Methods("GET") // Commented out until implemented
+	// payments.HandleFunc("/{id}/cancel", paymentHandler.CancelPayment).Methods("POST") // Commented out until implemented
+	// payments.HandleFunc("/bulk", paymentHandler.BulkPayment).Methods("POST") // Commented out until implemented
 
 	// Start server
 	srv := &http.Server{
@@ -524,12 +1918,38 @@ func main() {
 		IdleTimeout:  cfg.Server.IdleTimeout,
 	}
 
+	// Configure mTLS if enabled
+	if cfg.Server.UseTLS {
+		// Load CA cert to verify clients (Gateway)
+		caCert, err := os.ReadFile(cfg.Server.CAFile)
+		if err != nil {
+			log.Fatal("Failed to read CA file", map[string]interface{}{"error": err.Error()})
+		}
+		caCertPool := x509.NewCertPool()
+		caCertPool.AppendCertsFromPEM(caCert)
+
+		srv.TLSConfig = &tls.Config{
+			ClientCAs:  caCertPool,
+			ClientAuth: tls.RequireAndVerifyClientCert,
+			MinVersion: tls.VersionTLS12,
+		}
+	}
+
 	// Graceful shutdown
 	go func() {
 		log.Info("Payment service started", map[string]interface{}{
 			"address": srv.Addr,
+			"tls":     cfg.Server.UseTLS,
 		})
-		if err := srv.ListenAndServe(); err != nil && err != http.ErrServerClosed {
+
+		var err error
+		if cfg.Server.UseTLS {
+			err = srv.ListenAndServeTLS(cfg.Server.CertFile, cfg.Server.KeyFile)
+		} else {
+			err = srv.ListenAndServe()
+		}
+
+		if err != nil && err != http.ErrServerClosed {
 			log.Fatal("Server failed to start", map[string]interface{}{
 				"error": err.Error(),
 			})

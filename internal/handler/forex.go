@@ -2,10 +2,13 @@
 package handler
 
 import (
+	"context"
 	"encoding/json"
 	"io"
 	"net/http"
+	"strconv"
 	"strings"
+	"time"
 
 	"kyd/internal/domain"
 	"kyd/internal/forex"
@@ -13,7 +16,16 @@ import (
 	"kyd/pkg/validator"
 
 	"github.com/gorilla/mux"
+	"github.com/gorilla/websocket"
 )
+
+var upgrader = websocket.Upgrader{
+	ReadBufferSize:  1024,
+	WriteBufferSize: 1024,
+	CheckOrigin: func(r *http.Request) bool {
+		return true // Allow all origins for now (CORS)
+	},
+}
 
 // ForexHandler manages forex endpoints.
 type ForexHandler struct {
@@ -109,8 +121,8 @@ func (h *ForexHandler) Calculate(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
-	if err := h.validator.Validate(&req); err != nil {
-		h.respondError(w, http.StatusBadRequest, err.Error())
+	if valErrs := h.validator.ValidateStructured(&req); valErrs != nil {
+		h.respondValidationErrors(w, valErrs)
 		return
 	}
 
@@ -130,19 +142,84 @@ func (h *ForexHandler) GetHistory(w http.ResponseWriter, r *http.Request) {
 	from := domain.Currency(vars["from"])
 	to := domain.Currency(vars["to"])
 
-	// TODO: Implement history
+	limit := 30 // Default limit
+	if l := r.URL.Query().Get("limit"); l != "" {
+		if parsed, err := strconv.Atoi(l); err == nil && parsed > 0 {
+			limit = parsed
+		}
+	}
+
+	history, err := h.service.GetHistory(r.Context(), from, to, limit)
+	if err != nil {
+		h.respondError(w, http.StatusInternalServerError, "Failed to fetch history")
+		return
+	}
+
 	h.respondJSON(w, http.StatusOK, map[string]interface{}{
 		"from":    from,
 		"to":      to,
-		"history": []interface{}{},
+		"history": history,
 	})
 }
 
-// WebSocketHandler provides real-time FX rates (not implemented).
+// WebSocketHandler provides real-time FX rates.
 func (h *ForexHandler) WebSocketHandler(w http.ResponseWriter, r *http.Request) {
-	_ = r
-	// TODO: Implement WebSocket for real-time rates
-	h.respondError(w, http.StatusNotImplemented, "WebSocket not implemented yet")
+	conn, err := upgrader.Upgrade(w, r, nil)
+	if err != nil {
+		h.logger.Error("WebSocket upgrade failed", map[string]interface{}{"error": err.Error()})
+		return
+	}
+	defer conn.Close()
+
+	h.logger.Info("WebSocket client connected", nil)
+
+	// Send initial rates
+	h.sendRates(r.Context(), conn)
+
+	// Send updates every 30 seconds
+	ticker := time.NewTicker(30 * time.Second)
+	defer ticker.Stop()
+
+	for {
+		select {
+		case <-ticker.C:
+			if err := h.sendRates(r.Context(), conn); err != nil {
+				h.logger.Error("Failed to send rates", map[string]interface{}{"error": err.Error()})
+				return
+			}
+		case <-r.Context().Done():
+			return
+		}
+	}
+}
+
+func (h *ForexHandler) sendRates(ctx context.Context, conn *websocket.Conn) error {
+	pairs := []struct {
+		from domain.Currency
+		to   domain.Currency
+	}{
+		{domain.MWK, domain.CNY},
+		{domain.CNY, domain.MWK},
+		{domain.MWK, domain.USD},
+		{domain.USD, domain.MWK},
+		{domain.CNY, domain.USD},
+		{domain.USD, domain.CNY},
+	}
+
+	var rates []*domain.ExchangeRate
+	for _, p := range pairs {
+		rate, err := h.service.GetRate(ctx, p.from, p.to)
+		if err != nil {
+			continue
+		}
+		rates = append(rates, rate)
+	}
+
+	return conn.WriteJSON(map[string]interface{}{
+		"type":      "rates_update",
+		"timestamp": time.Now(),
+		"rates":     rates,
+	})
 }
 
 func (h *ForexHandler) respondJSON(w http.ResponseWriter, status int, data interface{}) {
@@ -156,4 +233,11 @@ func (h *ForexHandler) respondJSON(w http.ResponseWriter, status int, data inter
 
 func (h *ForexHandler) respondError(w http.ResponseWriter, status int, message string) {
 	h.respondJSON(w, status, map[string]string{"error": message})
+}
+
+func (h *ForexHandler) respondValidationErrors(w http.ResponseWriter, errors map[string]string) {
+	h.respondJSON(w, http.StatusBadRequest, map[string]interface{}{
+		"error":             "Validation failed",
+		"validation_errors": errors,
+	})
 }

@@ -8,16 +8,18 @@ import (
 
 // Common errors
 var (
-	ErrUserNotFound        = errors.New("user not found")
-	ErrUserAlreadyExists   = errors.New("user already exists")
-	ErrInvalidCredentials  = errors.New("invalid credentials")
-	ErrWalletNotFound      = errors.New("wallet not found")
-	ErrWalletAlreadyExists = errors.New("wallet already exists")
-	ErrInsufficientBalance = errors.New("insufficient balance")
-	ErrTransactionNotFound = errors.New("transaction not found")
-	ErrSettlementNotFound  = errors.New("settlement not found")
-	ErrRateNotAvailable    = errors.New("exchange rate not available")
-	ErrCurrencyNotAllowed  = errors.New("currency not allowed for user country")
+	ErrUserNotFound             = errors.New("user not found")
+	ErrUserAlreadyExists        = errors.New("user already exists")
+	ErrInvalidCredentials       = errors.New("invalid credentials")
+	ErrWalletNotFound           = errors.New("wallet not found")
+	ErrWalletAlreadyExists      = errors.New("wallet already exists")
+	ErrInsufficientBalance      = errors.New("insufficient balance")
+	ErrTransactionNotFound      = errors.New("transaction not found")
+	ErrTransactionAlreadyExists = errors.New("transaction already exists")
+	ErrDuplicateRequest         = errors.New("Duplicate request")
+	ErrSettlementNotFound       = errors.New("settlement not found")
+	ErrRateNotAvailable         = errors.New("exchange rate not available")
+	ErrCurrencyNotAllowed       = errors.New("currency not allowed for user country")
 )
 
 // Wrap wraps an error with additional context
