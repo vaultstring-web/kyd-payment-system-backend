@@ -83,6 +83,41 @@ func (h *WalletHandler) CreateWallet(w http.ResponseWriter, r *http.Request) {
 	h.respondJSON(w, http.StatusCreated, wallet)
 }
 
+// Deposit handles adding funds to a wallet
+func (h *WalletHandler) Deposit(w http.ResponseWriter, r *http.Request) {
+	vars := mux.Vars(r)
+	walletID, err := uuid.Parse(vars["id"])
+	if err != nil {
+		h.respondError(w, http.StatusBadRequest, "Invalid wallet ID")
+		return
+	}
+
+	var req wallet.DepositRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		h.respondError(w, http.StatusBadRequest, "Invalid request body")
+		return
+	}
+
+	req.WalletID = walletID
+
+	if errs := h.validator.ValidateStructured(&req); errs != nil {
+		h.respondValidationErrors(w, errs)
+		return
+	}
+
+	updatedWallet, err := h.service.Deposit(r.Context(), &req)
+	if err != nil {
+		h.logger.Error("Deposit failed", map[string]interface{}{
+			"error":     err.Error(),
+			"wallet_id": walletID,
+		})
+		h.respondError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+
+	h.respondJSON(w, http.StatusOK, updatedWallet)
+}
+
 // GetWallet returns a wallet by ID.
 func (h *WalletHandler) GetWallet(w http.ResponseWriter, r *http.Request) {
 	vars := mux.Vars(r)

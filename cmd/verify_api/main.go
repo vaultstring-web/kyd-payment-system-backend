@@ -120,6 +120,23 @@ func main() {
 		}
 	}
 
+	// 5. Verify GetUserTransactions (simulating GET /api/v1/transactions)
+	fmt.Println("\n--- Verifying GetUserTransactions (GET /api/v1/transactions) ---")
+	txs, err := txRepo.FindByUserID(ctx, johnDoe.ID, 10, 0)
+	if err != nil {
+		log.Fatalf("Failed to get user transactions: %v", err)
+	}
+
+	if len(txs) == 0 {
+		fmt.Println("[WARN] No transactions found for John Doe (This might be expected if new DB)")
+	} else {
+		fmt.Printf("[PASS] Found %d transactions for John Doe:\n", len(txs))
+		for _, tx := range txs {
+			fmt.Printf("  - Ref: %s | Amount: %s %s | Fee: %s %s | Status: %s\n",
+				tx.Reference, tx.Amount, tx.Currency, tx.FeeAmount, tx.FeeCurrency, tx.Status)
+		}
+	}
+
 	fmt.Println("=========================================================")
 	fmt.Println("VERIFICATION COMPLETE")
 	fmt.Println("=========================================================")

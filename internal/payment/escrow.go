@@ -50,8 +50,8 @@ func (s *Service) CreateEscrow(ctx context.Context, req *EscrowRequest) (*Paymen
 		Reference:         s.generateReference(),
 		SenderID:          req.SenderID,
 		ReceiverID:        req.ReceiverID,
-		SenderWalletID:    senderWallet.ID,
-		ReceiverWalletID:  receiverWallet.ID,
+		SenderWalletID:    &senderWallet.ID,
+		ReceiverWalletID:  &receiverWallet.ID,
 		Amount:            req.Amount,
 		Currency:          req.Currency,
 		ConvertedAmount:   req.Amount, // Assuming same currency for simplicity in escrow
@@ -59,7 +59,8 @@ func (s *Service) CreateEscrow(ctx context.Context, req *EscrowRequest) (*Paymen
 		ExchangeRate:      decimal.NewFromInt(1),
 		Status:            domain.TransactionStatusReserved, // CRITICAL: Reserved, not Completed
 		TransactionType:   domain.TransactionTypePayment,
-		Description:       &req.Description,
+		Channel:           "api",
+		Description:       req.Description,
 		InitiatedAt:       time.Now(),
 		CreatedAt:         time.Now(),
 		UpdatedAt:         time.Now(),
@@ -74,16 +75,8 @@ func (s *Service) CreateEscrow(ctx context.Context, req *EscrowRequest) (*Paymen
 		return nil, err
 	}
 
-	// 4. Reserve Funds (Debit Sender, but do NOT Credit Receiver yet)
-	// We need a specific Ledger operation for "Reserve"
-	// For now, we simulate this by debiting sender and holding in system/suspense,
-	// or simply debiting sender and updating their "ReservedBalance" if supported.
-	// Since our simple wallet model might not have "ReservedBalance", we'll just Debit sender
-	// and assume funds are in "transit" (Ledger imbalance temporarily, or stored in internal Escrow Wallet).
-
-	// Best practice: Move to an internal Escrow Wallet.
-	// For this simulation: We just debit the sender. The receiver gets nothing yet.
-	if err := s.walletRepo.DebitWallet(ctx, senderWallet.ID, req.Amount); err != nil {
+	// 4. Reserve Funds (Move from Available to Reserved)
+	if err := s.walletRepo.ReserveFunds(ctx, senderWallet.ID, req.Amount); err != nil {
 		tx.Status = domain.TransactionStatusFailed
 		s.repo.Update(ctx, tx)
 		return nil, fmt.Errorf("failed to reserve funds: %v", err)
@@ -121,7 +114,10 @@ func (s *Service) ReleaseEscrow(ctx context.Context, txID uuid.UUID, userID uuid
 	}
 
 	// Credit Receiver
-	if err := s.walletRepo.CreditWallet(ctx, tx.ReceiverWalletID, tx.ConvertedAmount); err != nil {
+	if tx.ReceiverWalletID == nil {
+		return errors.New("receiver wallet missing")
+	}
+	if err := s.walletRepo.CreditWallet(ctx, *tx.ReceiverWalletID, tx.ConvertedAmount); err != nil {
 		return fmt.Errorf("failed to credit receiver: %v", err)
 	}
 
@@ -155,14 +151,17 @@ func (s *Service) RefundEscrow(ctx context.Context, txID uuid.UUID, userID uuid.
 	}
 
 	// Refund Sender
-	if err := s.walletRepo.CreditWallet(ctx, tx.SenderWalletID, tx.Amount); err != nil {
+	if tx.SenderWalletID == nil {
+		return errors.New("sender wallet missing")
+	}
+	if err := s.walletRepo.CreditWallet(ctx, *tx.SenderWalletID, tx.Amount); err != nil {
 		return fmt.Errorf("failed to refund sender: %v", err)
 	}
 
 	// Update Status
 	tx.Status = domain.TransactionStatusCancelled
 	reason := "Escrow Refunded"
-	tx.StatusReason = &reason
+	tx.StatusReason = reason
 	now := time.Now()
 	tx.UpdatedAt = now
 

@@ -60,6 +60,12 @@ func (c *Connector) SubmitSettlement(_ context.Context, s *domain.Settlement) (*
 		Weight:       1.0,
 		ProposerID:   "validator_1", // Simplified
 	}
+
+	// Validate Block using Consensus Engine (Smart Contracts & Compliance)
+	if !c.Simulator.Consensus.ValidateBlock(mb) {
+		return nil, fmt.Errorf("blockchain validation failed: smart contract or compliance violation")
+	}
+
 	shard.MicroBlocks[mb.BlockID] = mb
 
 	// Update tips to point to this new block

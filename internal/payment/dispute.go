@@ -56,8 +56,8 @@ func (s *Service) InitiateDispute(ctx context.Context, req InitiateDisputeReques
 	tx.Status = domain.TransactionStatusDisputed
 	tx.UpdatedAt = time.Now()
 	// Appending to description is a bit hacky, but consistent with quick implementation
-	newDesc := fmt.Sprintf("%s | Dispute: %s - %s", *tx.Description, req.Reason, req.Description)
-	tx.Description = &newDesc
+	newDesc := fmt.Sprintf("%s | Dispute: %s - %s", tx.Description, req.Reason, req.Description)
+	tx.Description = newDesc
 
 	err = s.repo.Update(ctx, tx)
 	if err != nil {
@@ -104,18 +104,22 @@ func (s *Service) ResolveDispute(ctx context.Context, req ResolveDisputeRequest)
 	}
 
 	if req.Resolution == "reverse" {
+		if tx.SenderWalletID == nil || tx.ReceiverWalletID == nil {
+			return errors.New("cannot reverse: missing wallet IDs")
+		}
 		// Reverse the money movement
 		// Create a reversal ledger posting (Swap Sender and Receiver)
 		reversalPosting := &ledger.LedgerPosting{
-			Reference:      fmt.Sprintf("REV-%s", tx.Reference),
-			DebitWalletID:  tx.ReceiverWalletID, // Receiver pays back
-			CreditWalletID: tx.SenderWalletID,   // Sender gets refund
-			DebitAmount:    tx.NetAmount,        // Refund the net amount
-			CreditAmount:   tx.NetAmount,
-			Currency:       tx.Currency,
-			TransactionID:  tx.ID,
-			EventType:      "dispute_reversal",
-			Description:    fmt.Sprintf("Reversal for dispute on %s", tx.Reference),
+			Reference:         fmt.Sprintf("REV-%s", tx.Reference),
+			DebitWalletID:     *tx.ReceiverWalletID,
+			CreditWalletID:    *tx.SenderWalletID,
+			DebitAmount:       tx.NetAmount, // Refund the net amount
+			CreditAmount:      tx.NetAmount,
+			Currency:          tx.ConvertedCurrency,
+			ConvertedCurrency: tx.Currency,
+			TransactionID:     tx.ID,
+			EventType:         "dispute_reversal",
+			Description:       fmt.Sprintf("Reversal for dispute on %s", tx.Reference),
 		}
 
 		if err := s.ledgerService.PostTransaction(ctx, reversalPosting); err != nil {
@@ -125,8 +129,8 @@ func (s *Service) ResolveDispute(ctx context.Context, req ResolveDisputeRequest)
 		// Update original transaction status
 		tx.Status = domain.TransactionStatusReversed
 		tx.UpdatedAt = time.Now()
-		notes := fmt.Sprintf("%s | Resolved: Reversed by admin %s. Notes: %s", *tx.Description, req.AdminID, req.Notes)
-		tx.Description = &notes
+		notes := fmt.Sprintf("%s | Resolved: Reversed by admin %s. Notes: %s", tx.Description, req.AdminID, req.Notes)
+		tx.Description = notes
 
 		err = s.repo.Update(ctx, tx)
 		if err != nil {
@@ -145,7 +149,7 @@ func (s *Service) ResolveDispute(ctx context.Context, req ResolveDisputeRequest)
 			Currency:         tx.Currency,
 			Status:           domain.TransactionStatusCompleted,
 			TransactionType:  domain.TransactionTypeReversal,
-			Description:      &req.Notes,
+			Description:      req.Notes,
 			InitiatedAt:      time.Now(),
 			CreatedAt:        time.Now(),
 			UpdatedAt:        time.Now(),
@@ -176,8 +180,8 @@ func (s *Service) ResolveDispute(ctx context.Context, req ResolveDisputeRequest)
 		// Revert to Completed
 		tx.Status = domain.TransactionStatusCompleted
 		tx.UpdatedAt = time.Now()
-		notes := fmt.Sprintf("%s | Resolved: Dismissed by admin %s. Notes: %s", *tx.Description, req.AdminID, req.Notes)
-		tx.Description = &notes
+		notes := fmt.Sprintf("%s | Resolved: Dismissed by admin %s. Notes: %s", tx.Description, req.AdminID, req.Notes)
+		tx.Description = notes
 
 		err = s.repo.Update(ctx, tx)
 		if err != nil {

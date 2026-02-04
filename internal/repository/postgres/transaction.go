@@ -97,15 +97,15 @@ func (r *TransactionRepository) Flag(ctx context.Context, id uuid.UUID, reason s
 func (r *TransactionRepository) FindByID(ctx context.Context, id uuid.UUID) (*domain.Transaction, error) {
 	var tx domain.Transaction
 	query := `
-        SELECT 
-            id, reference, sender_id, receiver_id, sender_wallet_id, receiver_wallet_id,
-            amount, currency, exchange_rate, converted_amount, converted_currency,
-            fee_amount, fee_currency, COALESCE(net_amount, converted_amount) AS net_amount,
-            status, status_reason, transaction_type, channel, category, description,
-            metadata, blockchain_tx_hash, settlement_id, initiated_at, completed_at,
-            created_at, updated_at
-        FROM customer_schema.transactions WHERE id = $1
-    `
+		SELECT 
+			id, reference, sender_id, receiver_id, sender_wallet_id, receiver_wallet_id,
+			amount, currency, exchange_rate, converted_amount, converted_currency,
+			fee_amount, COALESCE(fee_currency, '') AS fee_currency, COALESCE(net_amount, converted_amount) AS net_amount,
+			status, COALESCE(status_reason, '') AS status_reason, transaction_type, COALESCE(channel, '') AS channel, COALESCE(category, '') AS category, COALESCE(description, '') AS description,
+			metadata, COALESCE(blockchain_tx_hash, '') AS blockchain_tx_hash, settlement_id, initiated_at, completed_at,
+			created_at, updated_at
+		FROM customer_schema.transactions WHERE id = $1
+	`
 
 	err := r.db.GetContext(ctx, &tx, query, id)
 	if err == sql.ErrNoRows {
@@ -121,15 +121,15 @@ func (r *TransactionRepository) FindByID(ctx context.Context, id uuid.UUID) (*do
 func (r *TransactionRepository) FindByReference(ctx context.Context, ref string) (*domain.Transaction, error) {
 	var tx domain.Transaction
 	query := `
-        SELECT 
-            id, reference, sender_id, receiver_id, sender_wallet_id, receiver_wallet_id,
-            amount, currency, exchange_rate, converted_amount, converted_currency,
-            fee_amount, fee_currency, COALESCE(net_amount, converted_amount) AS net_amount,
-            status, status_reason, transaction_type, channel, category, description,
-            metadata, blockchain_tx_hash, settlement_id, initiated_at, completed_at,
-            created_at, updated_at
-        FROM customer_schema.transactions WHERE reference = $1
-    `
+		SELECT 
+			id, reference, sender_id, receiver_id, sender_wallet_id, receiver_wallet_id,
+			amount, currency, exchange_rate, converted_amount, converted_currency,
+			fee_amount, COALESCE(fee_currency, '') AS fee_currency, COALESCE(net_amount, converted_amount) AS net_amount,
+			status, COALESCE(status_reason, '') AS status_reason, transaction_type, COALESCE(channel, '') AS channel, COALESCE(category, '') AS category, COALESCE(description, '') AS description,
+			metadata, COALESCE(blockchain_tx_hash, '') AS blockchain_tx_hash, settlement_id, initiated_at, completed_at,
+			created_at, updated_at
+		FROM customer_schema.transactions WHERE reference = $1
+	`
 
 	err := r.db.GetContext(ctx, &tx, query, ref)
 	if err == sql.ErrNoRows {
@@ -145,18 +145,18 @@ func (r *TransactionRepository) FindByReference(ctx context.Context, ref string)
 func (r *TransactionRepository) FindByUserID(ctx context.Context, userID uuid.UUID, limit, offset int) ([]*domain.Transaction, error) {
 	var txs []*domain.Transaction
 	query := `
-        SELECT 
-            id, reference, sender_id, receiver_id, sender_wallet_id, receiver_wallet_id,
-            amount, currency, exchange_rate, converted_amount, converted_currency,
-            fee_amount, fee_currency, COALESCE(net_amount, converted_amount) AS net_amount,
-            status, status_reason, transaction_type, channel, category, description,
-            metadata, blockchain_tx_hash, settlement_id, initiated_at, completed_at,
-            created_at, updated_at
-        FROM customer_schema.transactions 
-        WHERE sender_id = $1 OR receiver_id = $1
-        ORDER BY created_at DESC
-        LIMIT $2 OFFSET $3
-    `
+		SELECT 
+			id, reference, sender_id, receiver_id, sender_wallet_id, receiver_wallet_id,
+			amount, currency, exchange_rate, converted_amount, converted_currency,
+			fee_amount, COALESCE(fee_currency, '') AS fee_currency, COALESCE(net_amount, converted_amount) AS net_amount,
+			status, COALESCE(status_reason, '') AS status_reason, transaction_type, COALESCE(channel, '') AS channel, COALESCE(category, '') AS category, COALESCE(description, '') AS description,
+			metadata, COALESCE(blockchain_tx_hash, '') AS blockchain_tx_hash, settlement_id, initiated_at, completed_at,
+			created_at, updated_at
+		FROM customer_schema.transactions 
+		WHERE sender_id = $1 OR receiver_id = $1
+		ORDER BY created_at DESC
+		LIMIT $2 OFFSET $3
+	`
 
 	err := r.db.SelectContext(ctx, &txs, query, userID, limit, offset)
 	if err != nil {
@@ -166,20 +166,66 @@ func (r *TransactionRepository) FindByUserID(ctx context.Context, userID uuid.UU
 	return txs, nil
 }
 
+func (r *TransactionRepository) GetTransactionVolume(ctx context.Context, months int) ([]*domain.TransactionVolume, error) {
+	var volumes []*domain.TransactionVolume
+	query := `
+        SELECT
+            TO_CHAR(created_at, 'Mon') as period,
+            COALESCE(SUM(CASE WHEN currency = 'CNY' THEN amount ELSE 0 END), 0) as cny,
+            COALESCE(SUM(CASE WHEN currency = 'MWK' THEN amount ELSE 0 END), 0) as mwk,
+            COALESCE(SUM(CASE WHEN currency = 'ZMW' THEN amount ELSE 0 END), 0) as zmw,
+            COALESCE(SUM(converted_amount), 0) as total
+        FROM customer_schema.transactions
+        WHERE created_at >= NOW() - ($1 || ' months')::INTERVAL
+        GROUP BY TO_CHAR(created_at, 'Mon'), DATE_TRUNC('month', created_at)
+        ORDER BY DATE_TRUNC('month', created_at) ASC
+    `
+
+	err := r.db.SelectContext(ctx, &volumes, query, months)
+	if err != nil {
+		return nil, errors.Wrap(err, "failed to get transaction volume")
+	}
+
+	return volumes, nil
+}
+
+func (r *TransactionRepository) GetSystemStats(ctx context.Context) (*domain.SystemStats, error) {
+	var stats domain.SystemStats
+	query := `
+        SELECT
+            COUNT(*) as total_transactions,
+            COALESCE(SUM(CASE WHEN status = 'completed' THEN 1 ELSE 0 END), 0) as completed,
+            COALESCE(SUM(CASE WHEN status IN ('pending', 'processing', 'settling') THEN 1 ELSE 0 END), 0) as pending,
+            COALESCE(SUM(CASE WHEN status = 'pending_approval' THEN 1 ELSE 0 END), 0) as pending_approvals,
+            COALESCE(SUM(CASE WHEN status = 'flagged' THEN 1 ELSE 0 END), 0) as flagged,
+            COALESCE(SUM(converted_amount), 0) as total_volume,
+            COALESCE(SUM(fee_amount), 0) as total_fees,
+            (SELECT COUNT(DISTINCT user_id) FROM (SELECT sender_id as user_id FROM customer_schema.transactions UNION SELECT receiver_id FROM customer_schema.transactions) as u) as active_users
+        FROM customer_schema.transactions
+    `
+
+	err := r.db.GetContext(ctx, &stats, query)
+	if err != nil {
+		return nil, errors.Wrap(err, "failed to get system stats")
+	}
+
+	return &stats, nil
+}
+
 func (r *TransactionRepository) FindByStatus(ctx context.Context, status domain.TransactionStatus, limit, offset int) ([]*domain.Transaction, error) {
 	var txs []*domain.Transaction
 	query := `
         SELECT 
             id, reference, sender_id, receiver_id, sender_wallet_id, receiver_wallet_id,
             amount, currency, exchange_rate, converted_amount, converted_currency,
-            fee_amount, fee_currency, COALESCE(net_amount, converted_amount) AS net_amount,
-            status, status_reason, transaction_type, channel, category, description,
-            metadata, blockchain_tx_hash, settlement_id, initiated_at, completed_at,
-            created_at, updated_at
-        FROM customer_schema.transactions 
-        WHERE status = $1
-        ORDER BY created_at ASC
-        LIMIT $2 OFFSET $3
+            fee_amount, COALESCE(fee_currency, '') AS fee_currency, COALESCE(net_amount, converted_amount) AS net_amount,
+			status, COALESCE(status_reason, '') AS status_reason, transaction_type, COALESCE(channel, '') AS channel, COALESCE(category, '') AS category, COALESCE(description, '') AS description,
+			metadata, COALESCE(blockchain_tx_hash, '') AS blockchain_tx_hash, settlement_id, initiated_at, completed_at,
+			created_at, updated_at
+		FROM customer_schema.transactions 
+		WHERE status = $1
+		ORDER BY created_at ASC
+		LIMIT $2 OFFSET $3
     `
 
 	err := r.db.SelectContext(ctx, &txs, query, status, limit, offset)
@@ -210,9 +256,9 @@ func (r *TransactionRepository) FindFlagged(ctx context.Context, limit, offset i
         SELECT 
             id, reference, sender_id, receiver_id, sender_wallet_id, receiver_wallet_id,
             amount, currency, exchange_rate, converted_amount, converted_currency,
-            fee_amount, fee_currency, COALESCE(net_amount, converted_amount) AS net_amount,
-            status, status_reason, transaction_type, channel, category, description,
-            metadata, blockchain_tx_hash, settlement_id, initiated_at, completed_at,
+            fee_amount, COALESCE(fee_currency, '') AS fee_currency, COALESCE(net_amount, converted_amount) AS net_amount,
+            status, COALESCE(status_reason, '') AS status_reason, transaction_type, COALESCE(channel, '') AS channel, COALESCE(category, '') AS category, COALESCE(description, '') AS description,
+            metadata, COALESCE(blockchain_tx_hash, '') AS blockchain_tx_hash, settlement_id, initiated_at, completed_at,
             created_at, updated_at
         FROM customer_schema.transactions 
         WHERE metadata->>'flagged' = 'true'
@@ -232,9 +278,9 @@ func (r *TransactionRepository) FindByWalletID(ctx context.Context, walletID uui
         SELECT 
             id, reference, sender_id, receiver_id, sender_wallet_id, receiver_wallet_id,
             amount, currency, exchange_rate, converted_amount, converted_currency,
-            fee_amount, fee_currency, COALESCE(net_amount, converted_amount) AS net_amount,
-            status, status_reason, transaction_type, channel, category, description,
-            metadata, blockchain_tx_hash, settlement_id, initiated_at, completed_at,
+            fee_amount, COALESCE(fee_currency, '') AS fee_currency, COALESCE(net_amount, converted_amount) AS net_amount,
+            status, COALESCE(status_reason, '') AS status_reason, transaction_type, COALESCE(channel, '') AS channel, COALESCE(category, '') AS category, COALESCE(description, '') AS description,
+            metadata, COALESCE(blockchain_tx_hash, '') AS blockchain_tx_hash, settlement_id, initiated_at, completed_at,
             created_at, updated_at
         FROM customer_schema.transactions 
         WHERE sender_wallet_id = $1 OR receiver_wallet_id = $1
@@ -256,9 +302,9 @@ func (r *TransactionRepository) FindStuckPending(ctx context.Context, olderThan 
         SELECT 
             id, reference, sender_id, receiver_id, sender_wallet_id, receiver_wallet_id,
             amount, currency, exchange_rate, converted_amount, converted_currency,
-            fee_amount, fee_currency, COALESCE(net_amount, converted_amount) AS net_amount,
-            status, status_reason, transaction_type, channel, category, description,
-            metadata, blockchain_tx_hash, settlement_id, initiated_at, completed_at,
+            fee_amount, COALESCE(fee_currency, '') AS fee_currency, COALESCE(net_amount, converted_amount) AS net_amount,
+            status, COALESCE(status_reason, '') AS status_reason, transaction_type, COALESCE(channel, '') AS channel, COALESCE(category, '') AS category, COALESCE(description, '') AS description,
+            metadata, COALESCE(blockchain_tx_hash, '') AS blockchain_tx_hash, settlement_id, initiated_at, completed_at,
             created_at, updated_at
         FROM customer_schema.transactions 
         WHERE status = 'pending' AND created_at < NOW() - $1::INTERVAL
@@ -296,9 +342,9 @@ func (r *TransactionRepository) FindAll(ctx context.Context, limit, offset int) 
         SELECT 
             id, reference, sender_id, receiver_id, sender_wallet_id, receiver_wallet_id,
             amount, currency, exchange_rate, converted_amount, converted_currency,
-            fee_amount, fee_currency, COALESCE(net_amount, converted_amount) AS net_amount,
-            status, status_reason, transaction_type, channel, category, description,
-            metadata, blockchain_tx_hash, settlement_id, initiated_at, completed_at,
+            fee_amount, COALESCE(fee_currency, '') AS fee_currency, COALESCE(net_amount, converted_amount) AS net_amount,
+            status, COALESCE(status_reason, '') AS status_reason, transaction_type, COALESCE(channel, '') AS channel, COALESCE(category, '') AS category, COALESCE(description, '') AS description,
+            metadata, COALESCE(blockchain_tx_hash, '') AS blockchain_tx_hash, settlement_id, initiated_at, completed_at,
             created_at, updated_at
         FROM customer_schema.transactions 
         ORDER BY created_at DESC
@@ -327,9 +373,9 @@ func (r *TransactionRepository) FindPendingSettlement(ctx context.Context, limit
         SELECT 
             id, reference, sender_id, receiver_id, sender_wallet_id, receiver_wallet_id,
             amount, currency, exchange_rate, converted_amount, converted_currency,
-            fee_amount, fee_currency, COALESCE(net_amount, converted_amount) AS net_amount,
-            status, status_reason, transaction_type, channel, category, description,
-            metadata, blockchain_tx_hash, settlement_id, initiated_at, completed_at,
+            fee_amount, COALESCE(fee_currency, '') AS fee_currency, COALESCE(net_amount, converted_amount) AS net_amount,
+            status, COALESCE(status_reason, '') AS status_reason, transaction_type, COALESCE(channel, '') AS channel, COALESCE(category, '') AS category, COALESCE(description, '') AS description,
+            metadata, COALESCE(blockchain_tx_hash, '') AS blockchain_tx_hash, settlement_id, initiated_at, completed_at,
             created_at, updated_at
         FROM customer_schema.transactions 
         WHERE status = 'pending_settlement' AND settlement_id IS NULL
@@ -351,12 +397,11 @@ func (r *TransactionRepository) FindBySettlementID(ctx context.Context, settleme
 		SELECT 
 			id, reference, sender_id, receiver_id, sender_wallet_id, receiver_wallet_id,
 			amount, currency, exchange_rate, converted_amount, converted_currency,
-			fee_amount, fee_currency, COALESCE(net_amount, converted_amount) AS net_amount,
-			status, status_reason, transaction_type, channel, category, description,
-			metadata, blockchain_tx_hash, settlement_id, initiated_at, completed_at,
+			fee_amount, COALESCE(fee_currency, '') AS fee_currency, COALESCE(net_amount, converted_amount) AS net_amount,
+			status, COALESCE(status_reason, '') AS status_reason, transaction_type, COALESCE(channel, '') AS channel, COALESCE(category, '') AS category, COALESCE(description, '') AS description,
+			metadata, COALESCE(blockchain_tx_hash, '') AS blockchain_tx_hash, settlement_id, initiated_at, completed_at,
 			created_at, updated_at
-		FROM customer_schema.transactions 
-		WHERE settlement_id = $1
+		FROM customer_schema.transactions WHERE settlement_id = $1
 	`
 
 	err := r.db.SelectContext(ctx, &txs, query, settlementID)
@@ -446,7 +491,7 @@ func (r *TransactionRepository) GetHourlyCount(ctx context.Context, userID uuid.
 func (r *TransactionRepository) SumVolume(ctx context.Context) (decimal.Decimal, error) {
 	var total decimal.Decimal
 	// Sum converted_amount for simplicity, or amount if currency matches base
-	// Assuming converted_amount is in base currency (MWK or USD)
+	// Assuming converted_amount is in base currency (MWK)
 	query := `SELECT COALESCE(SUM(converted_amount), 0) FROM customer_schema.transactions WHERE status = 'completed'`
 	err := r.db.GetContext(ctx, &total, query)
 	if err != nil {

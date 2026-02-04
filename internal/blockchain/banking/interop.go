@@ -80,10 +80,10 @@ func (lb *LiquidityBridge) CompleteSwap(swap *AtomicSwap, preimage string) error
 func (lb *LiquidityBridge) GetExchangeRate(fromCcy, toCcy string) float64 {
 	// Hardcoded simulation rates
 	rates := map[string]float64{
-		"USD-EUR": 0.92,
-		"EUR-USD": 1.09,
-		"USD-MWK": 1750.0,
-		"MWK-USD": 0.00057,
+		"ZMW-MWK": 65.0,
+		"MWK-ZMW": 0.015,
+		"CNY-MWK": 240.0,
+		"MWK-CNY": 0.0042,
 	}
 	
 	key := fmt.Sprintf("%s-%s", fromCcy, toCcy)

@@ -101,7 +101,7 @@ func NewTradingEngine(config TradingConfig) *TradingEngine {
 	engine.marketMaker = NewMarketMaker(engine)
 	engine.riskEngine = NewTradingRiskEngine()
 
-	pairs := []string{"MWK-CNY", "MWK-USD", "CNY-USD", "USD-EUR", "USD-GBP", "EUR-GBP"}
+	pairs := []string{"MWK-CNY", "MWK-ZMW", "CNY-ZMW"}
 	for _, pair := range pairs {
 		engine.orderBooks[pair] = NewOrderBook(pair)
 	}

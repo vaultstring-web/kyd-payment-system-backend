@@ -22,6 +22,11 @@ var (
 	ErrCurrencyNotAllowed       = errors.New("currency not allowed for user country")
 )
 
+// New returns a new error with the given text
+func New(text string) error {
+	return errors.New(text)
+}
+
 // Wrap wraps an error with additional context
 func Wrap(err error, message string) error {
 	if err == nil {

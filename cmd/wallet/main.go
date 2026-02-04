@@ -116,6 +116,7 @@ func main() {
 	api.Use(middleware.NewRateLimiter(redisClient, 80, time.Minute).WithAdaptive(5, 15*time.Minute).Limit)
 
 	api.HandleFunc("/wallets", walletHandler.CreateWallet).Methods("POST")
+	api.HandleFunc("/wallets/{id}/deposit", walletHandler.Deposit).Methods("POST")
 	api.HandleFunc("/wallets/search", walletHandler.SearchWallets).Methods("GET")
 	api.HandleFunc("/wallets/lookup", walletHandler.LookupWallet).Methods("GET")
 	api.HandleFunc("/wallets", walletHandler.GetUserWallets).Methods("GET")

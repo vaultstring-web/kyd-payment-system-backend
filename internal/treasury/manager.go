@@ -107,7 +107,7 @@ func NewTreasuryManager(config TreasuryConfig) *TreasuryManager {
 			{
 				Name:        "market_crash",
 				Description: "Major market downturn",
-				Shocks:      map[string]float64{"USD": -0.10, "EUR": -0.12, "GBP": -0.15, "MWK": -0.25, "CNY": -0.08},
+				Shocks:      map[string]float64{"EUR": -0.12, "GBP": -0.15, "MWK": -0.25, "CNY": -0.08},
 			},
 			{
 				Name:        "currency_crisis",
@@ -117,13 +117,13 @@ func NewTreasuryManager(config TreasuryConfig) *TreasuryManager {
 			{
 				Name:        "liquidity_crunch",
 				Description: "Global liquidity crisis",
-				Shocks:      map[string]float64{"USD": -0.05, "EUR": -0.08, "GBP": -0.10, "MWK": -0.40, "CNY": -0.15},
+				Shocks:      map[string]float64{"EUR": -0.08, "GBP": -0.10, "MWK": -0.40, "CNY": -0.15},
 			},
 		}
 	}
 
 	// Initialize default liquidity pools
-	currencies := []string{"USD", "EUR", "GBP", "CNY", "MWK", "ZAR"}
+	currencies := []string{"EUR", "GBP", "CNY", "MWK", "ZAR"}
 	for _, c := range currencies {
 		tm.liquidityPools[c] = &LiquidityPool{
 			Currency:    c,

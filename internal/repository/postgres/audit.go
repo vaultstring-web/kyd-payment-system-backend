@@ -47,9 +47,10 @@ func (r *AuditRepository) FindByUserID(ctx context.Context, userID uuid.UUID, li
 	var logs []*domain.AuditLog
 	query := `
 		SELECT 
-			id, user_id, action, entity_type, entity_id,
-			old_values, new_values, ip_address, user_agent,
-			request_id, status_code, error_message, created_at
+			id, user_id, action, COALESCE(entity_type, '') AS entity_type,
+            CASE WHEN entity_id IS NULL THEN '00000000-0000-0000-0000-000000000000' ELSE entity_id END AS entity_id,
+			COALESCE(old_values, '{}'::jsonb) AS old_values, COALESCE(new_values, '{}'::jsonb) AS new_values, COALESCE(ip_address, '0.0.0.0') AS ip_address, COALESCE(user_agent, '') AS user_agent,
+			COALESCE(request_id, '') AS request_id, status_code, COALESCE(error_message, '') AS error_message, created_at
 		FROM admin_schema.audit_logs
 		WHERE user_id = $1 OR (entity_type = 'user' AND entity_id = $1)
 		ORDER BY created_at DESC
@@ -67,9 +68,10 @@ func (r *AuditRepository) FindAll(ctx context.Context, limit, offset int) ([]*do
 	var logs []*domain.AuditLog
 	query := `
 		SELECT 
-			id, user_id, action, entity_type, entity_id,
-			old_values, new_values, ip_address, user_agent,
-			request_id, status_code, error_message, created_at
+			id, user_id, action, COALESCE(entity_type, '') AS entity_type,
+            CASE WHEN entity_id IS NULL THEN '00000000-0000-0000-0000-000000000000' ELSE entity_id END AS entity_id,
+			COALESCE(old_values, '{}'::jsonb) AS old_values, COALESCE(new_values, '{}'::jsonb) AS new_values, COALESCE(ip_address, '0.0.0.0') AS ip_address, COALESCE(user_agent, '') AS user_agent,
+			COALESCE(request_id, '') AS request_id, status_code, COALESCE(error_message, '') AS error_message, created_at
 		FROM admin_schema.audit_logs
 		ORDER BY created_at DESC
 		LIMIT $1 OFFSET $2

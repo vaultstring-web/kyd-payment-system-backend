@@ -276,12 +276,12 @@ func (s *Service) GetUserByID(ctx context.Context, id uuid.UUID) (*domain.User, 
 }
 
 // ListUsers returns a paginated list of users and total count.
-func (s *Service) ListUsers(ctx context.Context, limit, offset int) ([]*domain.User, int, error) {
-	users, err := s.repo.FindAll(ctx, limit, offset)
+func (s *Service) ListUsers(ctx context.Context, limit, offset int, userType string) ([]*domain.User, int, error) {
+	users, err := s.repo.FindAll(ctx, limit, offset, userType)
 	if err != nil {
 		return nil, 0, err
 	}
-	total, err := s.repo.CountAll(ctx)
+	total, err := s.repo.CountAll(ctx, userType)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -445,6 +445,6 @@ type Repository interface {
 	SetEmailVerified(ctx context.Context, id uuid.UUID) error
 	AddDevice(ctx context.Context, device *domain.UserDevice) error
 	IsCountryTrusted(ctx context.Context, userID uuid.UUID, countryCode string) (bool, error)
-	FindAll(ctx context.Context, limit, offset int) ([]*domain.User, error)
-	CountAll(ctx context.Context) (int, error)
+	FindAll(ctx context.Context, limit, offset int, userType string) ([]*domain.User, error)
+	CountAll(ctx context.Context, userType string) (int, error)
 }

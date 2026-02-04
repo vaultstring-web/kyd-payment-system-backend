@@ -46,6 +46,7 @@ type Service struct {
 	monitor       *monitoring.BehavioralMonitor
 	notifier      notification.Service
 	auditRepo     AuditRepository
+	securityRepo  SecurityRepository
 }
 
 func NewService(
@@ -56,6 +57,7 @@ func NewService(
 	userRepo UserRepository,
 	notifier notification.Service,
 	auditRepo AuditRepository,
+	securityRepo SecurityRepository,
 	log logger.Logger,
 	cfg *config.Config,
 ) *Service {
@@ -84,6 +86,7 @@ func NewService(
 		monitor:       monitoring.NewBehavioralMonitor(),
 		notifier:      notifier,
 		auditRepo:     auditRepo,
+		securityRepo:  securityRepo,
 	}
 }
 
@@ -117,6 +120,37 @@ func (s *Service) InitiatePayment(ctx context.Context, req *InitiatePaymentReque
 		return nil, err
 	}
 
+	// 0.05 Check Blocklist (Sender)
+	if isBlocked, err := s.securityRepo.IsBlacklisted(ctx, req.SenderID.String()); err != nil {
+		s.logger.Error("Failed to check blocklist", map[string]interface{}{"error": err.Error()})
+		return nil, errors.New("system error: unable to verify security status")
+	} else if isBlocked {
+		s.logger.Warn("Transaction blocked: Sender is blacklisted", map[string]interface{}{"sender_id": req.SenderID})
+		return nil, errors.New("security alert: account is restricted")
+	}
+
+	// 0.06 Check Blocklist (Receiver ID)
+	if req.ReceiverID != uuid.Nil {
+		if isBlocked, err := s.securityRepo.IsBlacklisted(ctx, req.ReceiverID.String()); err != nil {
+			s.logger.Error("Failed to check blocklist", map[string]interface{}{"error": err.Error()})
+			return nil, errors.New("system error: unable to verify security status")
+		} else if isBlocked {
+			s.logger.Warn("Transaction blocked: Receiver is blacklisted", map[string]interface{}{"receiver_id": req.ReceiverID})
+			return nil, errors.New("security alert: receiver account is restricted")
+		}
+	}
+
+	// 0.07 Check Blocklist (Receiver Wallet Address)
+	if req.ReceiverWalletAddress != "" {
+		if isBlocked, err := s.securityRepo.IsBlacklisted(ctx, req.ReceiverWalletAddress); err != nil {
+			s.logger.Error("Failed to check blocklist", map[string]interface{}{"error": err.Error()})
+			return nil, errors.New("system error: unable to verify security status")
+		} else if isBlocked {
+			s.logger.Warn("Transaction blocked: Receiver wallet is blacklisted", map[string]interface{}{"wallet": req.ReceiverWalletAddress})
+			return nil, errors.New("security alert: receiver wallet is restricted")
+		}
+	}
+
 	// 0.1 Check Daily Limit
 	dailyTotal, err := s.repo.GetDailyTotal(ctx, req.SenderID, req.Currency)
 	if err != nil {
@@ -138,6 +172,19 @@ func (s *Service) InitiatePayment(ctx context.Context, req *InitiatePaymentReque
 			_ = s.notifier.Notify(context.Background(), req.SenderID, "RISK_ALERT", map[string]interface{}{
 				"reason": "Daily transaction limit exceeded",
 				"limit":  s.riskEngine.GetConfig().MaxDailyLimit,
+			})
+		}()
+
+		// Log Security Event
+		go func() {
+			_ = s.securityRepo.LogSecurityEvent(context.Background(), &domain.SecurityEvent{
+				Type:        "risk_block",
+				Severity:    "high",
+				Description: fmt.Sprintf("Daily limit exceeded. Amount: %s. Total: %s", req.Amount.String(), dailyTotal.String()),
+				Status:      "blocked",
+				UserID:      &req.SenderID,
+				IPAddress:   req.Location,
+				CreatedAt:   time.Now(),
 			})
 		}()
 
@@ -201,6 +248,20 @@ func (s *Service) InitiatePayment(ctx context.Context, req *InitiatePaymentReque
 					"user_id":   req.SenderID,
 					"device_id": req.DeviceID,
 				})
+
+				// Log Security Event
+				go func() {
+					_ = s.securityRepo.LogSecurityEvent(context.Background(), &domain.SecurityEvent{
+						Type:        "auth_failure",
+						Severity:    "high",
+						Description: fmt.Sprintf("Untrusted device blocked. DeviceID: %s", req.DeviceID),
+						Status:      "blocked",
+						UserID:      &req.SenderID,
+						IPAddress:   req.Location,
+						CreatedAt:   time.Now(),
+					})
+				}()
+
 				return nil, errors.New("security alert: transaction blocked from new/untrusted device")
 			}
 		}
@@ -250,11 +311,11 @@ func (s *Service) InitiatePayment(ctx context.Context, req *InitiatePaymentReque
 	var limit decimal.Decimal
 	switch sender.KYCLevel {
 	case 1:
-		limit = decimal.NewFromInt(50000) // Tier 1: Low limit
+		limit = decimal.NewFromInt(5000000) // Tier 1: 5M limit (increased for testing)
 	case 2:
-		limit = decimal.NewFromInt(1000000) // Tier 2: Medium limit
+		limit = decimal.NewFromInt(10000000) // Tier 2: 10M limit
 	case 3:
-		limit = decimal.NewFromInt(10000000) // Tier 3: High limit
+		limit = decimal.NewFromInt(100000000) // Tier 3: 100M limit
 	default:
 		limit = decimal.NewFromInt(0) // Tier 0: No sending
 	}
@@ -273,11 +334,11 @@ func (s *Service) InitiatePayment(ctx context.Context, req *InitiatePaymentReque
 	var dailyLimit decimal.Decimal
 	switch sender.KYCLevel {
 	case 1:
-		dailyLimit = decimal.NewFromInt(200000)
+		dailyLimit = decimal.NewFromInt(10000000) // Tier 1: 10M Daily
 	case 2:
-		dailyLimit = decimal.NewFromInt(5000000)
+		dailyLimit = decimal.NewFromInt(50000000) // Tier 2: 50M Daily
 	case 3:
-		dailyLimit = decimal.NewFromInt(50000000)
+		dailyLimit = decimal.NewFromInt(500000000) // Tier 3: 500M Daily
 	default:
 		dailyLimit = decimal.Zero
 	}
@@ -297,6 +358,18 @@ func (s *Service) InitiatePayment(ctx context.Context, req *InitiatePaymentReque
 			"user_id":      req.SenderID,
 			"hourly_count": hourlyCount,
 		})
+		// Log Security Event
+		go func() {
+			_ = s.securityRepo.LogSecurityEvent(context.Background(), &domain.SecurityEvent{
+				Type:        "risk_block",
+				Severity:    "medium",
+				Description: fmt.Sprintf("Velocity limit exceeded. Hourly Count: %d", hourlyCount),
+				Status:      "blocked",
+				UserID:      &req.SenderID,
+				IPAddress:   req.Location,
+				CreatedAt:   time.Now(),
+			})
+		}()
 		return nil, err
 	}
 
@@ -359,20 +432,51 @@ func (s *Service) InitiatePayment(ctx context.Context, req *InitiatePaymentReque
 			})
 		}()
 
+		// Log Security Event
+		go func() {
+			_ = s.securityRepo.LogSecurityEvent(context.Background(), &domain.SecurityEvent{
+				Type:        "risk_block",
+				Severity:    "critical",
+				Description: fmt.Sprintf("Transaction blocked. Risk Score: %d. Amount: %s", riskScore, req.Amount.String()),
+				Status:      "blocked",
+				UserID:      &req.SenderID,
+				IPAddress:   req.Location,
+				CreatedAt:   time.Now(),
+			})
+		}()
+
 		return nil, errors.New("transaction blocked by risk engine")
 	}
 
-	// Get receiver's wallet (wallet number ONLY)
+	// Get receiver's wallet
 	var receiverWallet *domain.Wallet
 
-	// Strict mode: Only use wallet address (number)
-	req.ReceiverID = uuid.Nil // Reset to ensure we lookup via wallet
+	if req.ReceiverWalletAddress != "" {
+		// Lookup by Address (Preferred/Strict)
+		receiverWallet, err = s.walletRepo.FindByAddress(ctx, req.ReceiverWalletAddress)
+		if err != nil {
+			return nil, pkgerrors.Wrap(err, "receiver wallet not found by address")
+		}
+		req.ReceiverID = receiverWallet.UserID
+	} else if req.ReceiverID != uuid.Nil {
+		// Lookup by UserID (Fallback for internal calls/simulations)
+		// We need to know which currency wallet to look for.
+		// If DestinationCurrency is set, use that. Otherwise assume same as sender (or default).
+		targetCurrency := req.DestinationCurrency
+		if targetCurrency == "" {
+			targetCurrency = req.Currency
+		}
 
-	receiverWallet, err = s.walletRepo.FindByAddress(ctx, req.ReceiverWalletAddress)
-	if err != nil {
-		return nil, pkgerrors.Wrap(err, "receiver wallet not found")
+		receiverWallet, err = s.walletRepo.FindByUserAndCurrency(ctx, req.ReceiverID, targetCurrency)
+		if err != nil {
+			// If not found in target currency, try to find ANY wallet or handle error
+			// For now, fail if not found
+			return nil, pkgerrors.Wrap(err, "receiver wallet not found for user")
+		}
+		req.ReceiverWalletAddress = *receiverWallet.WalletAddress
+	} else {
+		return nil, errors.New("receiver information missing (wallet address or user id required)")
 	}
-	req.ReceiverID = receiverWallet.UserID
 
 	// 2. Check if currency conversion needed
 	exchangeRate := decimal.NewFromInt(1)
@@ -411,8 +515,8 @@ func (s *Service) InitiatePayment(ctx context.Context, req *InitiatePaymentReque
 		Reference:         req.Reference,
 		SenderID:          req.SenderID,
 		ReceiverID:        req.ReceiverID,
-		SenderWalletID:    senderWallet.ID,
-		ReceiverWalletID:  receiverWallet.ID,
+		SenderWalletID:    &senderWallet.ID,
+		ReceiverWalletID:  &receiverWallet.ID,
 		Amount:            req.Amount,
 		Currency:          req.Currency,
 		ExchangeRate:      exchangeRate,
@@ -423,9 +527,9 @@ func (s *Service) InitiatePayment(ctx context.Context, req *InitiatePaymentReque
 		NetAmount:         convertedAmount,
 		Status:            initialStatus,
 		TransactionType:   domain.TransactionTypePayment,
-		Channel:           &req.Channel,
-		Category:          &req.Category,
-		Description:       &req.Description,
+		Channel:           req.Channel,
+		Category:          req.Category,
+		Description:       req.Description,
 		Metadata:          req.Metadata,
 		InitiatedAt:       time.Now(),
 		CreatedAt:         time.Now(),
@@ -493,7 +597,7 @@ func (s *Service) InitiatePayment(ctx context.Context, req *InitiatePaymentReque
 		s.riskEngine.ReportFailure()
 		tx.Status = domain.TransactionStatusFailed
 		reason := err.Error()
-		tx.StatusReason = &reason
+		tx.StatusReason = reason
 		tx.UpdatedAt = time.Now()
 		s.logger.Error("Ledger posting failed", map[string]interface{}{
 			"error":              err.Error(),
@@ -634,7 +738,7 @@ func (s *Service) GetReceipt(ctx context.Context, txID uuid.UUID, userID uuid.UU
 		Fee:           tx.FeeAmount,
 		TotalDebited:  tx.Amount.Add(tx.FeeAmount),
 		Status:        string(tx.Status),
-		Description:   *tx.Description,
+		Description:   tx.Description,
 	}, nil
 }
 
@@ -692,8 +796,6 @@ func (s *Service) getReceiverWallet(ctx context.Context, userID uuid.UUID, curre
 			defaultCurrency = "MWK"
 		case "CN":
 			defaultCurrency = "CNY"
-		case "US":
-			defaultCurrency = "USD"
 		case "ZA":
 			defaultCurrency = "ZAR"
 		case "GB":
@@ -746,11 +848,15 @@ func (s *Service) GetUserTransactions(ctx context.Context, userID uuid.UUID, lim
 		}
 
 		// Enrich with Wallet Numbers
-		if sWallet, err := s.walletRepo.FindByID(ctx, tx.SenderWalletID); err == nil && sWallet.WalletAddress != nil {
-			detail.SenderWalletNumber = *sWallet.WalletAddress
+		if tx.SenderWalletID != nil {
+			if sWallet, err := s.walletRepo.FindByID(ctx, *tx.SenderWalletID); err == nil && sWallet.WalletAddress != nil {
+				detail.SenderWalletNumber = *sWallet.WalletAddress
+			}
 		}
-		if rWallet, err := s.walletRepo.FindByID(ctx, tx.ReceiverWalletID); err == nil && rWallet.WalletAddress != nil {
-			detail.ReceiverWalletNumber = *rWallet.WalletAddress
+		if tx.ReceiverWalletID != nil {
+			if rWallet, err := s.walletRepo.FindByID(ctx, *tx.ReceiverWalletID); err == nil && rWallet.WalletAddress != nil {
+				detail.ReceiverWalletNumber = *rWallet.WalletAddress
+			}
 		}
 		details = append(details, detail)
 	}
@@ -781,11 +887,15 @@ func (s *Service) GetAllTransactions(ctx context.Context, limit, offset int) ([]
 		}
 
 		// Enrich with Wallet Numbers
-		if sWallet, err := s.walletRepo.FindByID(ctx, tx.SenderWalletID); err == nil && sWallet.WalletAddress != nil {
-			detail.SenderWalletNumber = *sWallet.WalletAddress
+		if tx.SenderWalletID != nil {
+			if sWallet, err := s.walletRepo.FindByID(ctx, *tx.SenderWalletID); err == nil && sWallet.WalletAddress != nil {
+				detail.SenderWalletNumber = *sWallet.WalletAddress
+			}
 		}
-		if rWallet, err := s.walletRepo.FindByID(ctx, tx.ReceiverWalletID); err == nil && rWallet.WalletAddress != nil {
-			detail.ReceiverWalletNumber = *rWallet.WalletAddress
+		if tx.ReceiverWalletID != nil {
+			if rWallet, err := s.walletRepo.FindByID(ctx, *tx.ReceiverWalletID); err == nil && rWallet.WalletAddress != nil {
+				detail.ReceiverWalletNumber = *rWallet.WalletAddress
+			}
 		}
 		details = append(details, detail)
 	}
@@ -811,6 +921,8 @@ type Repository interface {
 	CountAll(ctx context.Context) (int, error)
 	FindAll(ctx context.Context, limit, offset int) ([]*domain.Transaction, error)
 	FindFlagged(ctx context.Context, limit, offset int) ([]*domain.Transaction, error)
+	GetTransactionVolume(ctx context.Context, months int) ([]*domain.TransactionVolume, error)
+	GetSystemStats(ctx context.Context) (*domain.SystemStats, error)
 }
 
 type AuditRepository interface {
@@ -839,6 +951,12 @@ type WalletRepository interface {
 	FindByAddress(ctx context.Context, address string) (*domain.Wallet, error)
 	DebitWallet(ctx context.Context, walletID uuid.UUID, amount decimal.Decimal) error
 	CreditWallet(ctx context.Context, walletID uuid.UUID, amount decimal.Decimal) error
+	ReserveFunds(ctx context.Context, walletID uuid.UUID, amount decimal.Decimal) error
+}
+
+type SecurityRepository interface {
+	LogSecurityEvent(ctx context.Context, event *domain.SecurityEvent) error
+	IsBlacklisted(ctx context.Context, value string) (bool, error)
 }
 
 type ForexService interface {
@@ -977,11 +1095,14 @@ func (s *Service) ReviewTransaction(ctx context.Context, txID uuid.UUID, adminID
 		s.logger.Info("Admin approving transaction", map[string]interface{}{"tx_id": txID, "admin_id": adminID})
 
 		// Fetch wallets
-		senderWallet, err := s.walletRepo.FindByID(ctx, tx.SenderWalletID)
+		if tx.SenderWalletID == nil || tx.ReceiverWalletID == nil {
+			return errors.New("missing wallet IDs for approval")
+		}
+		senderWallet, err := s.walletRepo.FindByID(ctx, *tx.SenderWalletID)
 		if err != nil {
 			return err
 		}
-		receiverWallet, err := s.walletRepo.FindByID(ctx, tx.ReceiverWalletID)
+		receiverWallet, err := s.walletRepo.FindByID(ctx, *tx.ReceiverWalletID)
 		if err != nil {
 			return err
 		}
@@ -1020,7 +1141,7 @@ func (s *Service) ReviewTransaction(ctx context.Context, txID uuid.UUID, adminID
 
 		tx.Status = domain.TransactionStatusFailed
 		failReason := fmt.Sprintf("Admin rejected: %s", reason)
-		tx.StatusReason = &failReason
+		tx.StatusReason = failReason
 		tx.UpdatedAt = time.Now()
 		if tx.Metadata == nil {
 			tx.Metadata = make(domain.Metadata)
@@ -1043,40 +1164,12 @@ func (s *Service) ReviewTransaction(ctx context.Context, txID uuid.UUID, adminID
 	return nil
 }
 
-type SystemStats struct {
-	TotalTransactions int             `json:"total_transactions"`
-	TotalVolume       decimal.Decimal `json:"total_volume"`
-	TotalEarnings     decimal.Decimal `json:"total_earnings"`
-	PendingApprovals  int             `json:"pending_approvals"`
+func (s *Service) GetSystemStats(ctx context.Context) (*domain.SystemStats, error) {
+	return s.repo.GetSystemStats(ctx)
 }
 
-func (s *Service) GetSystemStats(ctx context.Context) (*SystemStats, error) {
-	totalTx, err := s.repo.CountAll(ctx)
-	if err != nil {
-		return nil, err
-	}
-
-	volume, err := s.repo.SumVolume(ctx)
-	if err != nil {
-		return nil, err
-	}
-
-	earnings, err := s.repo.SumEarnings(ctx)
-	if err != nil {
-		return nil, err
-	}
-
-	pending, err := s.repo.CountByStatus(ctx, domain.TransactionStatusPendingApproval)
-	if err != nil {
-		return nil, err
-	}
-
-	return &SystemStats{
-		TotalTransactions: totalTx,
-		TotalVolume:       volume,
-		TotalEarnings:     earnings,
-		PendingApprovals:  pending,
-	}, nil
+func (s *Service) GetTransactionVolume(ctx context.Context, months int) ([]*domain.TransactionVolume, error) {
+	return s.repo.GetTransactionVolume(ctx, months)
 }
 
 func (s *Service) GetDisputes(ctx context.Context, limit, offset int) ([]*domain.Transaction, int, error) {

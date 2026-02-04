@@ -159,8 +159,6 @@ func (s *Service) updateAllRates() {
 	pairs := []struct{ from, to domain.Currency }{
 		{domain.MWK, domain.CNY},
 		{domain.CNY, domain.MWK},
-		{domain.MWK, domain.USD},
-		{domain.CNY, domain.USD},
 	}
 
 	for _, pair := range pairs {

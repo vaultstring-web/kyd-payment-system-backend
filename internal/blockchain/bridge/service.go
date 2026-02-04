@@ -73,7 +73,7 @@ func (b *LiquidityBridge) ExecuteAtomicSwap(ctx context.Context, direction SwapD
 			Sender:    mockKey(senderAddr),
 			Receiver:  mockKey("BRIDGE_VAULT_RIPPLE"),
 			Amount:    amount,
-			Currency:  "USD",
+			Currency:  "CNY",
 			Timestamp: float64(time.Now().UnixNano()) / 1e9,
 		}
 		lockProof = fmt.Sprintf("ripple_proof_%s", tx.TxID)
@@ -88,7 +88,7 @@ func (b *LiquidityBridge) ExecuteAtomicSwap(ctx context.Context, direction SwapD
 	var releaseTxID string
 
 	if direction == StellarToRipple {
-		// Release on Ripple (Mint/Unlock USD equivalent)
+		// Release on Ripple (Mint/Unlock CNY equivalent)
 		releaseTx := &ripple.Transaction{
 			TxID:      uuid.New().String(),
 			Sender:    mockKey("BRIDGE_HOT_WALLET_RIPPLE"),
@@ -106,7 +106,7 @@ func (b *LiquidityBridge) ExecuteAtomicSwap(ctx context.Context, direction SwapD
 			SenderZKAddress:   "BRIDGE_HOT_WALLET_STELLAR",
 			ReceiverZKAddress: receiverAddr,
 			Amount:            amount,
-			AssetType:         "USD-WRAPPED",
+			AssetType:         "CNY-WRAPPED",
 			Transparent:       true,
 		}
 		releaseTxID = releaseTx.TxID

@@ -34,6 +34,76 @@ func NewService(repo Repository, txRepo TransactionRepository, userRepo UserRepo
 	}
 }
 
+type DepositRequest struct {
+	WalletID uuid.UUID       `json:"wallet_id"`
+	Amount   decimal.Decimal `json:"amount" validate:"required,gt=0"`
+	SourceID string          `json:"source_id" validate:"required"`
+	Currency domain.Currency `json:"currency" validate:"required"`
+}
+
+// Deposit adds funds to a wallet
+func (s *Service) Deposit(ctx context.Context, req *DepositRequest) (*domain.Wallet, error) {
+	wallet, err := s.repo.FindByID(ctx, req.WalletID)
+	if err != nil {
+		return nil, errors.Wrap(err, "failed to find wallet")
+	}
+
+	// Verify User KYC Status
+	user, err := s.userRepo.FindByID(ctx, wallet.UserID)
+	if err != nil {
+		return nil, errors.Wrap(err, "failed to fetch user for deposit verification")
+	}
+	if user.KYCStatus != domain.KYCStatusVerified {
+		return nil, errors.New("deposit rejected: user is not KYC verified")
+	}
+
+	if wallet.Currency != req.Currency {
+		return nil, errors.New("currency mismatch")
+	}
+
+	// Update balance
+	wallet.LedgerBalance = wallet.LedgerBalance.Add(req.Amount)
+	wallet.AvailableBalance = wallet.AvailableBalance.Add(req.Amount)
+	wallet.UpdatedAt = time.Now()
+
+	if err := s.repo.Update(ctx, wallet); err != nil {
+		return nil, errors.Wrap(err, "failed to update wallet balance")
+	}
+
+	// Create transaction record
+	tx := &domain.Transaction{
+		ID:               uuid.New(),
+		TransactionType:  domain.TransactionTypeDeposit,
+		Status:           domain.TransactionStatusCompleted,
+		Amount:           req.Amount,
+		Currency:         req.Currency,
+		SenderWalletID:   nil, // External source
+		ReceiverWalletID: &wallet.ID,
+		Reference:        fmt.Sprintf("DEP-%s", uuid.New().String()[:8]),
+		Description:      fmt.Sprintf("Deposit from %s", req.SourceID),
+		CreatedAt:        time.Now(),
+		UpdatedAt:        time.Now(),
+	}
+
+	if err := s.txRepo.Create(ctx, tx); err != nil {
+		// Log error but don't fail the request as balance is already updated
+		// In a real system, this should be transactional
+		s.logger.Error("Failed to create transaction record for deposit", map[string]interface{}{
+			"error":     err.Error(),
+			"wallet_id": wallet.ID,
+			"amount":    req.Amount,
+		})
+	}
+
+	s.logger.Info("Deposit successful", map[string]interface{}{
+		"wallet_id": wallet.ID,
+		"amount":    req.Amount,
+		"currency":  req.Currency,
+	})
+
+	return wallet, nil
+}
+
 type CreateWalletRequest struct {
 	UserID   uuid.UUID       `json:"user_id" validate:"required"`
 	Currency domain.Currency `json:"currency" validate:"required"`
@@ -46,6 +116,10 @@ func (s *Service) CreateWallet(ctx context.Context, req *CreateWalletRequest) (*
 		return nil, errors.Wrap(err, "failed to fetch user for wallet creation")
 	}
 
+	if user.KYCStatus != domain.KYCStatusVerified {
+		return nil, errors.New("wallet creation rejected: user is not KYC verified")
+	}
+
 	switch user.CountryCode {
 	case "CN":
 		if req.Currency != domain.CNY {
@@ -55,8 +129,16 @@ func (s *Service) CreateWallet(ctx context.Context, req *CreateWalletRequest) (*
 		if req.Currency != domain.MWK {
 			return nil, errors.ErrCurrencyNotAllowed
 		}
+	case "ZM":
+		if req.Currency != domain.ZMW {
+			return nil, errors.ErrCurrencyNotAllowed
+		}
 	default:
-		return nil, errors.ErrCurrencyNotAllowed
+		// Default fallback
+		// Allow ZMW or MWK as international options
+		if req.Currency != domain.ZMW && req.Currency != domain.MWK {
+			return nil, errors.ErrCurrencyNotAllowed
+		}
 	}
 
 	// Check if wallet already exists
@@ -348,13 +430,17 @@ func (s *Service) GetTransactionHistory(ctx context.Context, walletID, userID uu
 		}
 
 		// Fetch Sender Wallet Number
-		if sWallet, err := s.repo.FindByID(ctx, tx.SenderWalletID); err == nil && sWallet.WalletAddress != nil {
-			detail.SenderWalletNumber = *sWallet.WalletAddress
+		if tx.SenderWalletID != nil {
+			if sWallet, err := s.repo.FindByID(ctx, *tx.SenderWalletID); err == nil && sWallet.WalletAddress != nil {
+				detail.SenderWalletNumber = *sWallet.WalletAddress
+			}
 		}
 
 		// Fetch Receiver Wallet Number
-		if rWallet, err := s.repo.FindByID(ctx, tx.ReceiverWalletID); err == nil && rWallet.WalletAddress != nil {
-			detail.ReceiverWalletNumber = *rWallet.WalletAddress
+		if tx.ReceiverWalletID != nil {
+			if rWallet, err := s.repo.FindByID(ctx, *tx.ReceiverWalletID); err == nil && rWallet.WalletAddress != nil {
+				detail.ReceiverWalletNumber = *rWallet.WalletAddress
+			}
 		}
 
 		details = append(details, detail)
@@ -378,6 +464,7 @@ type Repository interface {
 }
 
 type TransactionRepository interface {
+	Create(ctx context.Context, tx *domain.Transaction) error
 	FindByWalletID(ctx context.Context, walletID uuid.UUID, limit, offset int) ([]*domain.Transaction, error)
 	CountByWalletID(ctx context.Context, walletID uuid.UUID) (int, error)
 }

@@ -132,7 +132,11 @@ func (c *Connector) SubmitSettlement(_ context.Context, s *domain.Settlement) (*
 		PublicKey:   sender, // Assuming sender is the validator/admin
 	}
 	if block := c.Node.CreateBlock(val); block != nil {
-		c.Node.AddBlock(block)
+		if !c.Node.AddBlock(block) {
+			return nil, fmt.Errorf("failed to add block to chain (validation failed)")
+		}
+	} else {
+		return nil, fmt.Errorf("failed to create block")
 	}
 
 	return &settlement.SettlementResult{

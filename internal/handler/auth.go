@@ -195,19 +195,37 @@ func (h *AuthHandler) SendVerification(w http.ResponseWriter, r *http.Request) {
 	h.respondJSON(w, http.StatusAccepted, map[string]string{"status": "verification email requested"})
 }
 
+type verifyEmailRequest struct {
+	Code string `json:"code" validate:"required"`
+}
+
 // VerifyEmail marks the user's email as verified using a token.
 func (h *AuthHandler) VerifyEmail(w http.ResponseWriter, r *http.Request) {
-	token := r.URL.Query().Get("token")
-	if token == "" {
-		h.respondError(w, http.StatusBadRequest, "Token is required")
-		return
-	}
-	if err := h.service.VerifyEmail(r.Context(), token); err != nil {
-		if err == errors.ErrInvalidCredentials {
-			h.respondError(w, http.StatusBadRequest, "Invalid or expired token")
+	var code string
+
+	if r.Method == http.MethodGet {
+		code = r.URL.Query().Get("token")
+		if code == "" {
+			h.respondError(w, http.StatusBadRequest, "Missing token")
 			return
 		}
-		h.respondError(w, http.StatusInternalServerError, "Verification failed")
+	} else {
+		var req verifyEmailRequest
+		r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
+		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+			h.respondError(w, http.StatusBadRequest, "Invalid request body")
+			return
+		}
+
+		if errs := h.validator.ValidateStructured(&req); errs != nil {
+			h.respondValidationErrors(w, errs)
+			return
+		}
+		code = req.Code
+	}
+
+	if err := h.service.VerifyEmail(r.Context(), code); err != nil {
+		h.respondError(w, http.StatusBadRequest, "Verification failed: "+err.Error())
 		return
 	}
 

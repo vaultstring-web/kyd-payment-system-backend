@@ -84,10 +84,10 @@ func (m *AuditMiddleware) Audit(next http.Handler) http.Handler {
 				ID:         uuid.New(),
 				UserID:     userID,
 				Action:     method + " " + path,
-				IPAddress:  &ip,
-				UserAgent:  &ua,
-				RequestID:  &reqID,
-				StatusCode: &status,
+				IPAddress:  ip,
+				UserAgent:  ua,
+				RequestID:  reqID,
+				StatusCode: status,
 				CreatedAt:  time.Now(),
 			}
 

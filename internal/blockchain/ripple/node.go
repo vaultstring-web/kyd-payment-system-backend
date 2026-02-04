@@ -237,6 +237,23 @@ func (n *BlockchainNode) verifyTransaction(tx *Transaction) bool {
 	if tx == nil {
 		return false
 	}
+
+	// Banking Compliance & Smart Contract Verification
+	if n.Consensus != nil {
+		// 1. Execute Smart Contract
+		if err := n.Consensus.ExecuteSmartContract(tx); err != nil {
+			// In a real node, we might log this reason
+			return false
+		}
+
+		// 2. Check Sanctions (if sender is present)
+		if tx.Sender != nil {
+			if n.Consensus.ComplianceManager.IsSanctioned(tx.Sender.ToHex()) {
+				return false
+			}
+		}
+	}
+
 	return true
 }
 

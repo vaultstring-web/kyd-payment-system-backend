@@ -86,6 +86,7 @@ func main() {
 	ledgerRepo := postgres.NewLedgerRepository(db)
 	forexRepo := postgres.NewForexRepository(db)
 	auditRepo := postgres.NewAuditRepository(db)
+	securityRepo := postgres.NewSecurityRepository(db)
 
 	ledgerService := ledger.NewService(db, ledgerRepo)
 	forexService := forex.NewService(forexRepo, nil, nil, logObj)
@@ -99,6 +100,7 @@ func main() {
 		userRepo,
 		notifier,
 		auditRepo,
+		securityRepo,
 		logObj,
 		cfg,
 	)
@@ -114,7 +116,7 @@ func main() {
 		log.Fatalf("Failed to get system stats: %v", err)
 	}
 	fmt.Printf("[PASS] System Stats: TotalTx=%d, Volume=%s, Earnings=%s, Pending=%d\n",
-		stats.TotalTransactions, stats.TotalVolume, stats.TotalEarnings, stats.PendingApprovals)
+		stats.TotalTransactions, stats.TotalVolume, stats.TotalFees, stats.PendingApprovals)
 
 	// 4. Verify GetAuditLogs
 	fmt.Println("\n--- Verifying GetAuditLogs ---")

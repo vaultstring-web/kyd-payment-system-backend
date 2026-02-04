@@ -305,7 +305,7 @@ func (r *UserRepository) UpdateLoginSecurity(ctx context.Context, id uuid.UUID, 
 	return errors.Wrap(err, "failed to update login security")
 }
 
-func (r *UserRepository) FindAll(ctx context.Context, limit, offset int) ([]*domain.User, error) {
+func (r *UserRepository) FindAll(ctx context.Context, limit, offset int, userType string) ([]*domain.User, error) {
 	var users []*domain.User
 	query := `
 			SELECT 
@@ -313,10 +313,11 @@ func (r *UserRepository) FindAll(ctx context.Context, limit, offset int) ([]*dom
 			country_code, date_of_birth, business_name, risk_score, is_active,
 			failed_login_attempts, locked_until, last_login, created_at, updated_at
 			FROM customer_schema.users
+			WHERE ($3 = '' OR user_type = $3)
 			ORDER BY created_at DESC
 			LIMIT $1 OFFSET $2
 		`
-	err := r.db.SelectContext(ctx, &users, query, limit, offset)
+	err := r.db.SelectContext(ctx, &users, query, limit, offset, userType)
 	if err != nil {
 		return nil, errors.Wrap(err, "failed to list users")
 	}
@@ -334,12 +335,48 @@ func (r *UserRepository) FindAll(ctx context.Context, limit, offset int) ([]*dom
 	return users, nil
 }
 
-func (r *UserRepository) CountAll(ctx context.Context) (int, error) {
+func (r *UserRepository) CountAll(ctx context.Context, userType string) (int, error) {
 	var total int
-	query := `SELECT COUNT(*) FROM customer_schema.users`
-	err := r.db.GetContext(ctx, &total, query)
+	query := `SELECT COUNT(*) FROM customer_schema.users WHERE ($1 = '' OR user_type = $1)`
+	err := r.db.GetContext(ctx, &total, query, userType)
 	if err != nil {
 		return 0, errors.Wrap(err, "failed to count users")
+	}
+	return total, nil
+}
+
+func (r *UserRepository) FindAllByKYCStatus(ctx context.Context, status string, limit, offset int) ([]*domain.User, error) {
+	var users []*domain.User
+	query := `
+			SELECT 
+			id, email, phone, first_name, last_name, user_type, kyc_level, kyc_status,
+			country_code, date_of_birth, business_name, risk_score, is_active,
+			failed_login_attempts, locked_until, last_login, created_at, updated_at
+			FROM customer_schema.users
+			WHERE ($3 = '' OR kyc_status = $3)
+			ORDER BY created_at ASC
+			LIMIT $1 OFFSET $2
+		`
+	err := r.db.SelectContext(ctx, &users, query, limit, offset, status)
+	if err != nil {
+		return nil, errors.Wrap(err, "failed to list users by kyc status")
+	}
+
+	for _, user := range users {
+		if err := r.decryptUser(user); err != nil {
+			return nil, err
+		}
+	}
+
+	return users, nil
+}
+
+func (r *UserRepository) CountAllByKYCStatus(ctx context.Context, status string) (int, error) {
+	var total int
+	query := `SELECT COUNT(*) FROM customer_schema.users WHERE ($1 = '' OR kyc_status = $1)`
+	err := r.db.GetContext(ctx, &total, query, status)
+	if err != nil {
+		return 0, errors.Wrap(err, "failed to count users by kyc status")
 	}
 	return total, nil
 }
@@ -553,6 +590,31 @@ func (r *WalletRepository) CreditWallet(ctx context.Context, walletID uuid.UUID,
 	return errors.Wrap(err, "failed to credit wallet")
 }
 
+func (r *WalletRepository) ReserveFunds(ctx context.Context, walletID uuid.UUID, amount decimal.Decimal) error {
+	query := `
+		UPDATE customer_schema.wallets 
+		SET available_balance = available_balance - $1,
+		    reserved_balance = reserved_balance + $1,
+		    updated_at = NOW()
+		WHERE id = $2 AND available_balance >= $1
+	`
+
+	result, err := r.db.ExecContext(ctx, query, amount, walletID)
+	if err != nil {
+		return errors.Wrap(err, "failed to reserve funds")
+	}
+
+	rows, err := result.RowsAffected()
+	if err != nil {
+		return err
+	}
+	if rows == 0 {
+		return errors.ErrInsufficientBalance
+	}
+
+	return nil
+}
+
 func (r *WalletRepository) Update(ctx context.Context, wallet *domain.Wallet) error {
 	query := `
 		UPDATE customer_schema.wallets SET
@@ -612,6 +674,12 @@ func (r *UserRepository) FindByKYCStatus(ctx context.Context, status string, lim
 	err = r.db.GetContext(ctx, &total, countQuery, status)
 	if err != nil {
 		return nil, 0, errors.Wrap(err, "failed to count users by kyc status")
+	}
+
+	for _, user := range users {
+		if err := r.decryptUser(user); err != nil {
+			return nil, 0, err
+		}
 	}
 
 	return users, total, nil

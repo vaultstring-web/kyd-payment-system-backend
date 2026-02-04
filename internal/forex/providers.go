@@ -13,9 +13,10 @@ import (
 	"sync"
 	"time"
 
+	"kyd/internal/domain"
+
 	"github.com/google/uuid"
 	"github.com/shopspring/decimal"
-	"kyd/internal/domain"
 )
 
 // ExchangeRateAPIProvider fetches real rates from open.er-api.com
@@ -138,10 +139,6 @@ func (p *MockRateProvider) GetRate(ctx context.Context, from, to domain.Currency
 	rates := map[string]decimal.Decimal{
 		"MWK-CNY": decimal.NewFromFloat(0.0085),
 		"CNY-MWK": decimal.NewFromFloat(117.65),
-		"MWK-USD": decimal.NewFromFloat(0.00058),
-		"USD-MWK": decimal.NewFromFloat(1724.14),
-		"CNY-USD": decimal.NewFromFloat(0.14),
-		"USD-CNY": decimal.NewFromFloat(7.14),
 	}
 
 	key := string(from) + "-" + string(to)
@@ -222,7 +219,6 @@ func NewSpreadEngine() *SpreadEngine {
 		},
 	}
 
-	se.liquidity["USD"] = 1.0
 	se.liquidity["EUR"] = 0.95
 	se.liquidity["GBP"] = 0.9
 	se.liquidity["CNY"] = 0.8
@@ -285,7 +281,7 @@ func (se *SpreadEngine) CalculateSpread(from, to string, baseRate decimal.Decima
 	factors["weekend"] = weekendAdjustment
 
 	// Factor 5: Exotic pair adjustment
-	majorCurrencies := map[string]bool{"USD": true, "EUR": true, "GBP": true, "JPY": true, "CHF": true}
+	majorCurrencies := map[string]bool{"EUR": true, "GBP": true, "JPY": true, "CHF": true, "CNY": true}
 	if !majorCurrencies[from] || !majorCurrencies[to] {
 		exoticAdjustment := 1.2
 		spread *= exoticAdjustment

@@ -162,7 +162,7 @@ func main() {
 	r.HandleFunc("/api/v1/auth/login", authHandler.Login).Methods("POST")
 	r.HandleFunc("/api/v1/auth/logout", authHandler.Logout).Methods("POST")
 	r.HandleFunc("/api/v1/auth/send-verification", authHandler.SendVerification).Methods("POST")
-	r.HandleFunc("/api/v1/auth/verify", authHandler.VerifyEmail).Methods("GET")
+	r.HandleFunc("/api/v1/auth/verify", authHandler.VerifyEmail).Methods("POST", "GET")
 	r.HandleFunc("/api/v1/auth/debug", authHandler.DebugUser).Methods("GET")
 
 	// Protected routes

@@ -3,6 +3,7 @@ package notification
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"sync"
 	"time"
@@ -171,13 +172,15 @@ func (s *DefaultService) SendRaw(ctx context.Context, n *Notification) error {
 		auditCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 
+		newValsBytes, _ := json.Marshal(newVals)
+
 		err := s.auditRepo.Create(auditCtx, &domain.AuditLog{
 			ID:         uuid.New(),
 			UserID:     &n.UserID,
 			Action:     action,
-			EntityType: &entityType,
-			EntityID:   &n.ID,
-			NewValues:  &newVals,
+			EntityType: entityType,
+			EntityID:   n.ID.String(),
+			NewValues:  newValsBytes,
 			CreatedAt:  time.Now(),
 		})
 		if err != nil {

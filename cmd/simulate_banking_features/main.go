@@ -112,6 +112,7 @@ func main() {
 	ledgerRepo := postgres.NewLedgerRepository(db)
 	forexRepo := postgres.NewForexRepository(db)
 	auditRepo := postgres.NewAuditRepository(db)
+	securityRepo := postgres.NewSecurityRepository(db)
 
 	ledgerService := ledger.NewService(db, ledgerRepo)
 	forexService := forex.NewService(forexRepo, nil, nil, logObj)
@@ -127,6 +128,7 @@ func main() {
 		userRepo,
 		notifier,
 		auditRepo,
+		securityRepo,
 		logObj,
 		cfg,
 	)

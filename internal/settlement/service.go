@@ -87,11 +87,11 @@ func (s *Service) RecoverPendingSettlements(ctx context.Context) error {
 	}
 
 	for _, settlement := range submitted {
-		if settlement.TransactionHash != nil {
-			go s.monitorSettlement(settlement.ID, *settlement.TransactionHash)
+		if settlement.TransactionHash != "" {
+			go s.monitorSettlement(settlement.ID, settlement.TransactionHash)
 			s.logger.Info("Resumed monitoring for settlement", map[string]interface{}{
 				"settlement_id": settlement.ID,
-				"tx_hash":       *settlement.TransactionHash,
+				"tx_hash":       settlement.TransactionHash,
 			})
 		}
 	}
@@ -115,7 +115,7 @@ func (s *Service) CleanupStuckTransactions(ctx context.Context) error {
 	for _, tx := range stuckTxs {
 		tx.Status = domain.TransactionStatusFailed
 		reason := "Timeout: Transaction stuck in pending state"
-		tx.StatusReason = &reason
+		tx.StatusReason = reason
 		now := time.Now()
 		tx.CompletedAt = &now
 		tx.UpdatedAt = now
@@ -240,7 +240,7 @@ func (s *Service) settleBatch(ctx context.Context, pair string, txs []*domain.Tr
 	}
 
 	// Update settlement with blockchain info
-	settlement.TransactionHash = &result.TxHash
+	settlement.TransactionHash = result.TxHash
 	settlement.Status = domain.SettlementStatusSubmitted
 	settlement.SubmissionCount++
 	now := time.Now()

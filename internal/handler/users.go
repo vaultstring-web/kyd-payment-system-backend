@@ -56,7 +56,8 @@ func (h *UsersHandler) List(w http.ResponseWriter, r *http.Request) {
 			offset = int(n)
 		}
 	}
-	users, total, err := h.service.ListUsers(r.Context(), limit, offset)
+	userType := r.URL.Query().Get("type")
+	users, total, err := h.service.ListUsers(r.Context(), limit, offset, userType)
 	if err != nil {
 		respondError(w, http.StatusInternalServerError, "Failed to list users")
 		return

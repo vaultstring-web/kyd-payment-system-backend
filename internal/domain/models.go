@@ -1,5 +1,3 @@
-// Package domain re-exports core domain types so internal code can import
-// `kyd/internal/domain` while using definitions from `kyd/pkg/domain`.
 package domain
 
 import pkg "kyd/pkg/domain"
@@ -58,12 +56,20 @@ type UserDevice = pkg.UserDevice
 // TransactionLedger represents an immutable ledger entry.
 type TransactionLedger = pkg.TransactionLedger
 
+// SecurityEvent represents a security-related event.
+type SecurityEvent = pkg.SecurityEvent
+
+// BlocklistEntry represents a blocked entity.
+type BlocklistEntry = pkg.BlocklistEntry
+
+// SystemHealthMetric represents a system health metric.
+type SystemHealthMetric = pkg.SystemHealthMetric
+
 // Re-exported currency codes.
 const (
 	MWK = pkg.MWK
 	CNY = pkg.CNY
-	USD = pkg.USD
-	EUR = pkg.EUR
+	ZMW = pkg.ZMW
 )
 
 // Re-exported user types.
@@ -132,4 +138,22 @@ const (
 	SettlementStatusCompleted  = pkg.SettlementStatusCompleted
 	SettlementStatusFailed     = pkg.SettlementStatusFailed
 	SettlementStatusReconciled = pkg.SettlementStatusReconciled
+)
+
+// Re-exported security constants
+const (
+	SecurityEventTypeBruteForce       = pkg.SecurityEventTypeBruteForce
+	SecurityEventTypeSuspiciousIP     = pkg.SecurityEventTypeSuspiciousIP
+	SecurityEventTypeAdminLoginFailed = pkg.SecurityEventTypeAdminLoginFailed
+	SecurityEventTypeVelocityLimit    = pkg.SecurityEventTypeVelocityLimit
+
+	SecuritySeverityCritical = pkg.SecuritySeverityCritical
+	SecuritySeverityHigh     = pkg.SecuritySeverityHigh
+	SecuritySeverityMedium   = pkg.SecuritySeverityMedium
+	SecuritySeverityLow      = pkg.SecuritySeverityLow
+
+	SecurityEventStatusOpen          = pkg.SecurityEventStatusOpen
+	SecurityEventStatusInvestigating = pkg.SecurityEventStatusInvestigating
+	SecurityEventStatusResolved      = pkg.SecurityEventStatusResolved
+	SecurityEventStatusFalsePositive = pkg.SecurityEventStatusFalsePositive
 )

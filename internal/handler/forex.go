@@ -86,10 +86,6 @@ func (h *ForexHandler) GetAllRates(w http.ResponseWriter, r *http.Request) {
 	}{
 		{domain.MWK, domain.CNY},
 		{domain.CNY, domain.MWK},
-		{domain.MWK, domain.USD},
-		{domain.USD, domain.MWK},
-		{domain.CNY, domain.USD},
-		{domain.USD, domain.CNY},
 	}
 
 	var rates []*domain.ExchangeRate
@@ -200,10 +196,6 @@ func (h *ForexHandler) sendRates(ctx context.Context, conn *websocket.Conn) erro
 	}{
 		{domain.MWK, domain.CNY},
 		{domain.CNY, domain.MWK},
-		{domain.MWK, domain.USD},
-		{domain.USD, domain.MWK},
-		{domain.CNY, domain.USD},
-		{domain.USD, domain.CNY},
 	}
 
 	var rates []*domain.ExchangeRate
