@@ -825,14 +825,38 @@ func (s *Service) GetTransaction(ctx context.Context, id uuid.UUID) (*domain.Tra
 	return s.repo.FindByID(ctx, id)
 }
 
-func (s *Service) GetUserTransactions(ctx context.Context, userID uuid.UUID, limit, offset int) ([]*TransactionDetail, int, error) {
-	txs, err := s.repo.FindByUserID(ctx, userID, limit, offset)
-	if err != nil {
-		return nil, 0, err
-	}
-	total, err := s.repo.CountByUserID(ctx, userID)
-	if err != nil {
-		return nil, 0, err
+func (s *Service) GetUserTransactions(ctx context.Context, userID uuid.UUID, walletID *uuid.UUID, limit, offset int) ([]*TransactionDetail, int, error) {
+	var txs []*domain.Transaction
+	var err error
+	var total int
+
+	if walletID != nil {
+		// Verify wallet belongs to user
+		wallet, err := s.walletRepo.FindByID(ctx, *walletID)
+		if err != nil {
+			return nil, 0, pkgerrors.Wrap(err, "failed to find wallet")
+		}
+		if wallet.UserID != userID {
+			return nil, 0, errors.New("unauthorized access to wallet transactions")
+		}
+
+		txs, err = s.repo.FindByWalletID(ctx, *walletID, limit, offset)
+		if err != nil {
+			return nil, 0, err
+		}
+		total, err = s.repo.CountByWalletID(ctx, *walletID)
+		if err != nil {
+			return nil, 0, err
+		}
+	} else {
+		txs, err = s.repo.FindByUserID(ctx, userID, limit, offset)
+		if err != nil {
+			return nil, 0, err
+		}
+		total, err = s.repo.CountByUserID(ctx, userID)
+		if err != nil {
+			return nil, 0, err
+		}
 	}
 
 	var details []*TransactionDetail
@@ -911,6 +935,8 @@ type Repository interface {
 	FindByReference(ctx context.Context, ref string) (*domain.Transaction, error)
 	FindByUserID(ctx context.Context, userID uuid.UUID, limit, offset int) ([]*domain.Transaction, error)
 	CountByUserID(ctx context.Context, userID uuid.UUID) (int, error)
+	FindByWalletID(ctx context.Context, walletID uuid.UUID, limit, offset int) ([]*domain.Transaction, error)
+	CountByWalletID(ctx context.Context, walletID uuid.UUID) (int, error)
 	GetDailyTotal(ctx context.Context, userID uuid.UUID, currency domain.Currency) (decimal.Decimal, error)
 	GetHourlyHighValueCount(ctx context.Context, userID uuid.UUID, threshold decimal.Decimal) (int, error)
 	GetHourlyCount(ctx context.Context, userID uuid.UUID) (int, error)

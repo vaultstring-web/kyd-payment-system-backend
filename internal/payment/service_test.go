@@ -269,6 +269,20 @@ func (m *MockAuditRepository) CountAll(ctx context.Context) (int, error) {
 	return args.Int(0), args.Error(1)
 }
 
+type MockSecurityRepository struct {
+	mock.Mock
+}
+
+func (m *MockSecurityRepository) IsBlacklisted(ctx context.Context, identifier string) (bool, error) {
+	args := m.Called(ctx, identifier)
+	return args.Bool(0), args.Error(1)
+}
+
+func (m *MockSecurityRepository) LogSecurityEvent(ctx context.Context, event *domain.SecurityEvent) error {
+	args := m.Called(ctx, event)
+	return args.Error(0)
+}
+
 // --- Tests ---
 
 func TestInitiatePayment_FeeCalculation(t *testing.T) {
@@ -280,8 +294,9 @@ func TestInitiatePayment_FeeCalculation(t *testing.T) {
 	mockLog := new(MockLogger)
 	mockNotifier := new(MockNotificationService)
 	mockAuditRepo := new(MockAuditRepository)
+	mockSecurityRepo := new(MockSecurityRepository)
 
-	service := NewService(mockRepo, mockWalletRepo, mockForex, mockLedger, mockUserRepo, mockNotifier, mockAuditRepo, mockLog, nil)
+	service := NewService(mockRepo, mockWalletRepo, mockForex, mockLedger, mockUserRepo, mockNotifier, mockAuditRepo, mockSecurityRepo, mockLog, nil)
 
 	ctx := context.Background()
 	senderID := uuid.New()
@@ -369,6 +384,10 @@ func TestInitiatePayment_FeeCalculation(t *testing.T) {
 	// Mock Notifications
 	mockNotifier.On("Notify", mock.Anything, senderID, "PAYMENT_SENT", mock.Anything).Return(nil)
 	mockNotifier.On("Notify", mock.Anything, receiverID, "PAYMENT_RECEIVED", mock.Anything).Return(nil)
+
+	// Mock Security
+	mockSecurityRepo.On("IsBlacklisted", mock.Anything, mock.Anything).Return(false, nil)
+	mockSecurityRepo.On("LogSecurityEvent", mock.Anything, mock.Anything).Return(nil)
 
 	// Execute
 	resp, err := service.InitiatePayment(ctx, req)

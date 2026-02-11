@@ -2,8 +2,8 @@
 package handler
 
 import (
+	"context"
 	"encoding/json"
-	"fmt"
 	"io"
 	"net/http"
 	"strings"
@@ -16,14 +16,21 @@ import (
 	"kyd/pkg/logger"
 	"kyd/pkg/validator"
 
+	"github.com/google/uuid"
 	"github.com/pquerna/otp/totp"
 )
+
+// AuditLogger defines the interface for persisting audit logs.
+type AuditLogger interface {
+	Create(ctx context.Context, log *domain.AuditLog) error
+}
 
 // AuthHandler handles authentication endpoints.
 type AuthHandler struct {
 	service      *auth.Service
 	validator    *validator.Validator
 	logger       logger.Logger
+	auditLogger  AuditLogger
 	totpIssuer   string
 	totpPeriod   int
 	totpDigits   int
@@ -31,11 +38,12 @@ type AuthHandler struct {
 }
 
 // NewAuthHandler creates a new AuthHandler.
-func NewAuthHandler(service *auth.Service, val *validator.Validator, log logger.Logger, totpIssuer string, totpPeriod int, totpDigits int, cookieSecure bool) *AuthHandler {
+func NewAuthHandler(service *auth.Service, val *validator.Validator, log logger.Logger, auditLogger AuditLogger, totpIssuer string, totpPeriod int, totpDigits int, cookieSecure bool) *AuthHandler {
 	return &AuthHandler{
 		service:      service,
 		validator:    val,
 		logger:       log,
+		auditLogger:  auditLogger,
 		totpIssuer:   totpIssuer,
 		totpPeriod:   totpPeriod,
 		totpDigits:   totpDigits,
@@ -74,7 +82,6 @@ func (h *AuthHandler) Register(w http.ResponseWriter, r *http.Request) {
 		}
 
 		h.respondError(w, http.StatusInternalServerError, "Registration failed")
-		h.respondError(w, http.StatusInternalServerError, fmt.Sprintf("Registration failed: %v", err))
 		return
 	}
 
@@ -83,6 +90,22 @@ func (h *AuthHandler) Register(w http.ResponseWriter, r *http.Request) {
 		"user_id": response.User.ID,
 		"email":   req.Email,
 		"ip":      r.RemoteAddr,
+	})
+
+	// Audit Log: User Registered
+	_ = h.auditLogger.Create(r.Context(), &domain.AuditLog{
+		ID:         uuid.New(),
+		Action:     "CREATE", // Maps to AuditAction.CREATE
+		UserID:     &response.User.ID,
+		EntityType: "user",
+		EntityID:   response.User.ID.String(),
+		UserEmail:  response.User.Email,
+		IPAddress:  r.RemoteAddr,
+		UserAgent:  r.UserAgent(),
+		CreatedAt:  time.Now(),
+		Metadata: map[string]interface{}{
+			"type": "registration",
+		},
 	})
 
 	// Set httpOnly cookies for access and refresh tokens
@@ -136,6 +159,20 @@ func (h *AuthHandler) Login(w http.ResponseWriter, r *http.Request) {
 			"ip":    r.RemoteAddr,
 			"ua":    r.UserAgent(),
 		})
+
+		// Audit Log: Login Failed
+		_ = h.auditLogger.Create(r.Context(), &domain.AuditLog{
+			ID:           uuid.New(),
+			Action:       "LOGIN_FAILED",
+			EntityType:   "user",
+			EntityID:     req.Email, // Use email as identifier for failed attempts
+			UserEmail:    req.Email,
+			IPAddress:    req.IPAddress,
+			UserAgent:    req.DeviceName,
+			ErrorMessage: err.Error(),
+			CreatedAt:    time.Now(),
+		})
+
 		h.respondError(w, http.StatusUnauthorized, "Invalid credentials")
 		return
 	}
@@ -144,6 +181,19 @@ func (h *AuthHandler) Login(w http.ResponseWriter, r *http.Request) {
 		"event":   "login_success",
 		"user_id": response.User.ID,
 		"ip":      r.RemoteAddr,
+	})
+
+	// Audit Log: Login Success
+	_ = h.auditLogger.Create(r.Context(), &domain.AuditLog{
+		ID:         uuid.New(),
+		Action:     "LOGIN_SUCCESS",
+		UserID:     &response.User.ID,
+		EntityType: "user",
+		EntityID:   response.User.ID.String(),
+		UserEmail:  response.User.Email,
+		IPAddress:  req.IPAddress,
+		UserAgent:  req.DeviceName,
+		CreatedAt:  time.Now(),
 	})
 
 	// Set httpOnly cookies for access and refresh tokens
@@ -340,6 +390,26 @@ func (h *AuthHandler) Logout(w http.ResponseWriter, r *http.Request) {
 	}
 
 	h.clearAuthCookies(w)
+
+	// Audit Log: Logout
+	// Note: We might not have user ID here if token was invalid, but we should log the attempt if possible.
+	// But Logout is usually called with a valid token or just clears cookies.
+	// If middleware extracted UserID, we can use it. But this handler might not be behind AuthMiddleware?
+	// Usually Logout IS behind AuthMiddleware.
+	userID, ok := middleware.UserIDFromContext(r.Context())
+	if ok {
+		_ = h.auditLogger.Create(r.Context(), &domain.AuditLog{
+			ID:         uuid.New(),
+			Action:     "LOGOUT",
+			UserID:     &userID,
+			EntityType: "user",
+			EntityID:   userID.String(),
+			IPAddress:  r.RemoteAddr,
+			UserAgent:  r.UserAgent(),
+			CreatedAt:  time.Now(),
+		})
+	}
+
 	h.respondJSON(w, http.StatusOK, map[string]string{"status": "logged_out"})
 }
 
@@ -399,10 +469,13 @@ func (h *AuthHandler) VerifyTOTP(w http.ResponseWriter, r *http.Request) {
 		h.respondError(w, http.StatusNotFound, "User not found")
 		return
 	}
-	if user.UserType != domain.UserTypeAdmin {
-		h.respondError(w, http.StatusForbidden, "Forbidden")
-		return
-	}
+	// Allow all users to verify TOTP
+	/*
+		if user.UserType != domain.UserTypeAdmin {
+			h.respondError(w, http.StatusForbidden, "Forbidden")
+			return
+		}
+	*/
 	var req totpVerifyRequest
 	r.Body = http.MaxBytesReader(w, r.Body, 1<<20)
 	dec := json.NewDecoder(r.Body)
@@ -433,6 +506,22 @@ func (h *AuthHandler) VerifyTOTP(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Audit Log: TOTP Enabled
+	_ = h.auditLogger.Create(r.Context(), &domain.AuditLog{
+		ID:         uuid.New(),
+		Action:     "UPDATE",
+		UserID:     &user.ID,
+		EntityType: "user",
+		EntityID:   user.ID.String(),
+		UserEmail:  user.Email,
+		IPAddress:  r.RemoteAddr,
+		UserAgent:  r.UserAgent(),
+		CreatedAt:  time.Now(),
+		Metadata: map[string]interface{}{
+			"type": "totp_enabled",
+		},
+	})
+
 	h.respondJSON(w, http.StatusOK, map[string]string{"status": "totp_verified"})
 }
 
@@ -449,6 +538,47 @@ func (h *AuthHandler) TOTPStatus(w http.ResponseWriter, r *http.Request) {
 	}
 	// Removed admin-only restriction
 	h.respondJSON(w, http.StatusOK, totpStatusResponse{Enabled: user.IsTOTPEnabled})
+}
+
+// DisableTOTP disables TOTP for the user.
+func (h *AuthHandler) DisableTOTP(w http.ResponseWriter, r *http.Request) {
+	userID, ok := middleware.UserIDFromContext(r.Context())
+	if !ok {
+		h.respondError(w, http.StatusUnauthorized, "Unauthorized")
+		return
+	}
+	user, err := h.service.GetUserByID(r.Context(), userID)
+	if err != nil {
+		h.respondError(w, http.StatusNotFound, "User not found")
+		return
+	}
+
+	// Disable TOTP
+	user.IsTOTPEnabled = false
+	user.TOTPSecret = nil // Optional: Clear the secret or keep it for re-enabling without new setup? Better to clear.
+
+	if err := h.service.UpdateUser(r.Context(), user); err != nil {
+		h.respondError(w, http.StatusInternalServerError, "Failed to disable TOTP")
+		return
+	}
+
+	// Audit Log: TOTP Disabled
+	_ = h.auditLogger.Create(r.Context(), &domain.AuditLog{
+		ID:         uuid.New(),
+		Action:     "UPDATE",
+		UserID:     &user.ID,
+		EntityType: "user",
+		EntityID:   user.ID.String(),
+		UserEmail:  user.Email,
+		IPAddress:  r.RemoteAddr,
+		UserAgent:  r.UserAgent(),
+		CreatedAt:  time.Now(),
+		Metadata: map[string]interface{}{
+			"type": "totp_disabled",
+		},
+	})
+
+	h.respondJSON(w, http.StatusOK, map[string]string{"status": "totp_disabled"})
 }
 
 func maskEmail(email string) string {

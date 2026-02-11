@@ -49,20 +49,28 @@ type Gateway struct {
 }
 
 func isAdminToken(tokenStr string, secret string) bool {
+	fmt.Printf("DEBUG: Checking admin token.\n")
 	token, err := jwt.Parse(tokenStr, func(token *jwt.Token) (interface{}, error) {
 		if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
 			return nil, jwt.ErrSignatureInvalid
 		}
 		return []byte(secret), nil
 	})
-	if err != nil || !token.Valid {
+	if err != nil {
+		fmt.Printf("DEBUG: Token parse error: %v\n", err)
+		return false
+	}
+	if !token.Valid {
+		fmt.Printf("DEBUG: Token invalid\n")
 		return false
 	}
 	claims, ok := token.Claims.(jwt.MapClaims)
 	if !ok {
+		fmt.Printf("DEBUG: Claims cast failed\n")
 		return false
 	}
 	ut, _ := claims["user_type"].(string)
+	fmt.Printf("DEBUG: user_type claim: '%s'\n", ut)
 	return ut == "admin"
 }
 
@@ -248,10 +256,13 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodPost || r.Method == http.MethodPut || r.Method == http.MethodPatch {
 		ct := r.Header.Get("Content-Type")
 		if ct == "" || (ct != "application/json" && ct != "application/json; charset=utf-8") {
-			applyCORSHeaders(w, r)
-			w.WriteHeader(http.StatusUnsupportedMediaType)
-			w.Write([]byte(`{"error":"unsupported_media_type","message":"Content-Type must be application/json"}`))
-			return
+			// Exempt endpoints that require multipart/form-data (e.g. KYC file upload)
+			if !matchPath(r.URL.Path, "/api/v1/compliance/kyc/submit") {
+				applyCORSHeaders(w, r)
+				w.WriteHeader(http.StatusUnsupportedMediaType)
+				w.Write([]byte(`{"error":"unsupported_media_type","message":"Content-Type must be application/json"}`))
+				return
+			}
 		}
 		// CSRF check (double-submit cookie), exempt login/register
 		path := r.URL.Path
@@ -347,6 +358,8 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 			// Admin endpoints are handled by payment service
 			g.paymentProxy.ServeHTTP(w, r)
 		case matchPath(r.URL.Path, "/api/v1/payments"):
+			g.paymentProxy.ServeHTTP(w, r)
+		case matchPath(r.URL.Path, "/api/v1/compliance"):
 			g.paymentProxy.ServeHTTP(w, r)
 		case matchPath(r.URL.Path, "/api/v1/wallets"):
 			g.walletProxy.ServeHTTP(w, r)

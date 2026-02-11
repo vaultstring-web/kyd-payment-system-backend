@@ -41,12 +41,21 @@ The database starts empty (or with only schema). To populate it with test users 
 
 Use these pre-seeded accounts to test the system:
 
-| Role | Email | Password | Purpose |
-| :--- | :--- | :--- | :--- |
-| **Admin** | `admin@example.com` | `AdminPassword123` | Access Admin Portal, approve transactions |
-| **Sender** | `john.doe@example.com` | `Password123!` | Sends money (MWK wallet) |
-| **Receiver** | `wang.wei@example.com` | `Password123!` | Receives money (CNY wallet) |
-| **Merchant** | `merchant@example.com` | `MerchantPass123!` | Merchant testing |
+est Accounts Created:
+---------------------------------------------------
+Admin User:
+  Email:    admin@kyd.com
+  Password: password123
+  Role:     ADMIN
+---------------------------------------------------
+Customer User:
+  Email:    customer@kyd.com
+  Password: password123
+  Role:     INDIVIDUAL
+---------------------------------------------------
+Additional Users:
+  - john.doe@example.com (password123)
+  - jane.smith@example.com (password123)
 
 ## 5. Frontend Testing Guide
 

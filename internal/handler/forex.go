@@ -78,23 +78,68 @@ func (h *ForexHandler) GetRateQuery(w http.ResponseWriter, r *http.Request) {
 	h.respondJSON(w, http.StatusOK, rate)
 }
 
+// GetHistory returns historical FX rates.
+func (h *ForexHandler) GetHistory(w http.ResponseWriter, r *http.Request) {
+	q := r.URL.Query()
+	fromStr := strings.TrimSpace(q.Get("from"))
+	toStr := strings.TrimSpace(q.Get("to"))
+	limitStr := strings.TrimSpace(q.Get("limit"))
+
+	if fromStr == "" || toStr == "" {
+		h.respondError(w, http.StatusBadRequest, "from and to query parameters are required")
+		return
+	}
+
+	limit := 30 // Default limit
+	if limitStr != "" {
+		if l, err := strconv.Atoi(limitStr); err == nil && l > 0 {
+			limit = l
+		}
+	}
+
+	from := domain.Currency(fromStr)
+	to := domain.Currency(toStr)
+
+	rates, err := h.service.GetHistory(r.Context(), from, to, limit)
+	if err != nil {
+		h.respondError(w, http.StatusInternalServerError, "Failed to fetch history")
+		return
+	}
+
+	h.respondJSON(w, http.StatusOK, rates)
+}
+
 // GetAllRates returns all available FX rates.
 func (h *ForexHandler) GetAllRates(w http.ResponseWriter, r *http.Request) {
-	pairs := []struct {
-		from domain.Currency
-		to   domain.Currency
-	}{
-		{domain.MWK, domain.CNY},
-		{domain.CNY, domain.MWK},
+	// Check for 'base' query param
+	baseStr := r.URL.Query().Get("base")
+	base := domain.Currency(baseStr)
+	if base == "" {
+		base = domain.MWK // Default to MWK if not specified
+	}
+
+	currencies := []domain.Currency{
+		domain.MWK, domain.CNY, domain.ZMW,
+		domain.ZAR, domain.KES, domain.NGN, domain.GHS, domain.UGX, domain.TZS, domain.RWF,
+		domain.INR, domain.JPY, domain.KRW, domain.SGD, domain.HKD,
+		domain.EUR, domain.GBP, domain.CHF,
 	}
 
 	var rates []*domain.ExchangeRate
-	for _, p := range pairs {
-		rate, err := h.service.GetRate(r.Context(), p.from, p.to)
-		if err != nil {
+	for _, c := range currencies {
+		if c == base {
 			continue
 		}
-		rates = append(rates, rate)
+		// Get Base -> Currency
+		rate, err := h.service.GetRate(r.Context(), base, c)
+		if err == nil {
+			rates = append(rates, rate)
+		}
+		// Get Currency -> Base (Inverse)
+		invRate, err := h.service.GetRate(r.Context(), c, base)
+		if err == nil {
+			rates = append(rates, invRate)
+		}
 	}
 
 	h.respondJSON(w, http.StatusOK, map[string]interface{}{"rates": rates})
@@ -130,32 +175,6 @@ func (h *ForexHandler) Calculate(w http.ResponseWriter, r *http.Request) {
 	}
 
 	h.respondJSON(w, http.StatusOK, result)
-}
-
-// GetHistory returns historical FX data (placeholder).
-func (h *ForexHandler) GetHistory(w http.ResponseWriter, r *http.Request) {
-	vars := mux.Vars(r)
-	from := domain.Currency(vars["from"])
-	to := domain.Currency(vars["to"])
-
-	limit := 30 // Default limit
-	if l := r.URL.Query().Get("limit"); l != "" {
-		if parsed, err := strconv.Atoi(l); err == nil && parsed > 0 {
-			limit = parsed
-		}
-	}
-
-	history, err := h.service.GetHistory(r.Context(), from, to, limit)
-	if err != nil {
-		h.respondError(w, http.StatusInternalServerError, "Failed to fetch history")
-		return
-	}
-
-	h.respondJSON(w, http.StatusOK, map[string]interface{}{
-		"from":    from,
-		"to":      to,
-		"history": history,
-	})
 }
 
 // WebSocketHandler provides real-time FX rates.

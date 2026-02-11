@@ -1,0 +1,4 @@
+ALTER TABLE customer_schema.users ADD COLUMN IF NOT EXISTS bio TEXT DEFAULT '';
+ALTER TABLE customer_schema.users ADD COLUMN IF NOT EXISTS city VARCHAR(100) DEFAULT '';
+ALTER TABLE customer_schema.users ADD COLUMN IF NOT EXISTS postal_code VARCHAR(20) DEFAULT '';
+ALTER TABLE customer_schema.users ADD COLUMN IF NOT EXISTS tax_id VARCHAR(255) DEFAULT '';

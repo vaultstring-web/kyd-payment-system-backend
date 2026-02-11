@@ -44,7 +44,14 @@ func main() {
 	log.Println("--- Setting up Receiver ---")
 	receiverEmail := fmt.Sprintf("receiver-seed-%d@test.com", time.Now().UnixNano())
 	receiverPass := "Password123!"
-	receiverToken, _ := registerAndLogin(receiverEmail, receiverPass, "CN")
+	receiverToken, receiverID := registerAndLogin(receiverEmail, receiverPass, "CN")
+
+	// Verify Receiver KYC
+	_, err = db.Exec("UPDATE customer_schema.users SET kyc_status='verified', kyc_level=3 WHERE id=$1", receiverID)
+	if err != nil {
+		log.Fatalf("Failed to verify receiver: %v", err)
+	}
+
 	receiverWalletNum := createWallet(receiverToken, "CNY")
 	log.Printf("Receiver Wallet: %s (CNY)", receiverWalletNum)
 
@@ -53,11 +60,18 @@ func main() {
 	senderEmail := fmt.Sprintf("admin-seed-%d@test.com", time.Now().UnixNano())
 	senderPass := "Password123!"
 	senderToken, senderID := registerAndLogin(senderEmail, senderPass, "MW")
+
+	// Verify Sender KYC (Already done later but needed for wallet creation)
+	_, err = db.Exec("UPDATE customer_schema.users SET kyc_status='verified', kyc_level=3 WHERE id=$1", senderID)
+	if err != nil {
+		log.Fatalf("Failed to verify sender: %v", err)
+	}
+
 	senderWalletNum := createWallet(senderToken, "MWK")
 	log.Printf("Sender Wallet: %s (MWK)", senderWalletNum)
 
-	// 4. Seed Balance (High Amount) & KYC
-	log.Println("--- Seeding Balance & KYC ---")
+	// 4. Seed Balance (High Amount)
+	log.Println("--- Seeding Balance ---")
 	_, err = db.Exec(`
 		UPDATE customer_schema.wallets 
 		SET available_balance = available_balance + 10000000, ledger_balance = ledger_balance + 10000000 
@@ -125,8 +139,10 @@ func registerAndLogin(email, password, country string) (string, string) {
 
 	// Login
 	loginPayload := map[string]interface{}{
-		"email":    email,
-		"password": password,
+		"email":       email,
+		"password":    password,
+		"device_id":   "seed-device",
+		"device_name": "Seed Script Device",
 	}
 	resp = request("POST", "/auth/login", "", loginPayload)
 	if resp.StatusCode != 200 {
@@ -189,7 +205,7 @@ func makePayment(token, receiverWalletNum string, amount float64) string {
 
 	resp := request("POST", "/payments", token, payload)
 	body := readBody(resp)
-	
+
 	// Accept 200 or 201
 	if resp.StatusCode != 200 && resp.StatusCode != 201 {
 		log.Fatalf("Payment failed: %d %s", resp.StatusCode, body)
@@ -197,7 +213,7 @@ func makePayment(token, receiverWalletNum string, amount float64) string {
 
 	var result map[string]interface{}
 	json.Unmarshal([]byte(body), &result)
-	
+
 	if tx, ok := result["transaction"].(map[string]interface{}); ok {
 		return tx["id"].(string)
 	}
@@ -213,6 +229,7 @@ func request(method, path, token string, body interface{}) *http.Response {
 
 	req, _ := http.NewRequest(method, baseURL+path, bodyReader)
 	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Device-ID", "seed-device") // Inject Device ID for payment checks
 	if token != "" {
 		req.Header.Set("Authorization", "Bearer "+token)
 		if method != "GET" {

@@ -55,6 +55,7 @@ func main() {
 	// Explicitly truncate child tables first to avoid FK issues if cascade isn't perfect or to be explicit
 	db.Exec("TRUNCATE TABLE customer_schema.transaction_ledger CASCADE")
 	db.Exec("TRUNCATE TABLE customer_schema.transactions CASCADE")
+	db.Exec("TRUNCATE TABLE customer_schema.user_devices CASCADE")
 	db.Exec("TRUNCATE TABLE customer_schema.wallets CASCADE")
 	db.Exec("TRUNCATE TABLE customer_schema.users CASCADE")
 

@@ -1,8 +1,3 @@
-// ==============================================================================
-// POSTGRESQL REPOSITORIES - internal/repository/postgres/
-// ==============================================================================
-
-// USER REPOSITORY - internal/repository/postgres/user.go
 package postgres
 
 import (
@@ -17,7 +12,6 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jmoiron/sqlx"
-	"github.com/shopspring/decimal"
 )
 
 type UserRepository struct {
@@ -69,9 +63,11 @@ func (r *UserRepository) Create(ctx context.Context, user *domain.User) error {
 			id, email, phone, password_hash, first_name, last_name,
 			user_type, kyc_level, kyc_status, country_code, date_of_birth,
 			business_name, risk_score, is_active, created_at, updated_at,
-			email_hash, phone_hash, totp_secret, is_totp_enabled
+			email_hash, phone_hash, totp_secret, is_totp_enabled,
+			bio, city, postal_code, tax_id
 		) VALUES (
-			$1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20
+			$1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20,
+			$21, $22, $23, $24
 		)
 	`
 
@@ -80,6 +76,7 @@ func (r *UserRepository) Create(ctx context.Context, user *domain.User) error {
 		user.UserType, user.KYCLevel, user.KYCStatus, user.CountryCode, user.DateOfBirth,
 		user.BusinessName, user.RiskScore, user.IsActive, user.CreatedAt, user.UpdatedAt,
 		emailHash, phoneHash, encTOTPSecret, user.IsTOTPEnabled,
+		user.Bio, user.City, user.PostalCode, user.TaxID,
 	)
 
 	if err != nil {
@@ -133,7 +130,8 @@ func (r *UserRepository) FindByID(ctx context.Context, id uuid.UUID) (*domain.Us
 			user_type, kyc_level, kyc_status, country_code, date_of_birth,
 			business_name, business_registration, risk_score, is_active,
 			email_verified, totp_secret, is_totp_enabled, last_login,
-			failed_login_attempts, locked_until, created_at, updated_at
+			failed_login_attempts, locked_until, created_at, updated_at,
+			bio, city, postal_code, tax_id
 		FROM customer_schema.users WHERE id = $1`
 
 	err := r.db.GetContext(ctx, &user, query, id)
@@ -151,7 +149,6 @@ func (r *UserRepository) FindByID(ctx context.Context, id uuid.UUID) (*domain.Us
 	return &user, nil
 }
 
-// FindByIDs fetches multiple users by their IDs in a single query.
 func (r *UserRepository) FindByIDs(ctx context.Context, ids []uuid.UUID) ([]*domain.User, error) {
 	if len(ids) == 0 {
 		return []*domain.User{}, nil
@@ -161,7 +158,8 @@ func (r *UserRepository) FindByIDs(ctx context.Context, ids []uuid.UUID) ([]*dom
 		SELECT 
 			id, email, phone, first_name, last_name, user_type, kyc_level, kyc_status,
 			country_code, date_of_birth, business_name, risk_score, is_active,
-			failed_login_attempts, locked_until, last_login, created_at, updated_at, is_totp_enabled
+			failed_login_attempts, locked_until, last_login, created_at, updated_at, is_totp_enabled,
+			bio, city, postal_code, tax_id
 		FROM customer_schema.users
 		WHERE id IN (?)`, ids)
 	if err != nil {
@@ -176,7 +174,6 @@ func (r *UserRepository) FindByIDs(ctx context.Context, ids []uuid.UUID) ([]*dom
 
 	for _, user := range users {
 		if err := r.decryptUser(user); err != nil {
-			// Log error but maybe continue? For strict security, we fail.
 			return nil, err
 		}
 	}
@@ -194,7 +191,8 @@ func (r *UserRepository) FindByEmail(ctx context.Context, email string) (*domain
 			user_type, kyc_level, kyc_status, country_code, date_of_birth,
 			business_name, business_registration, risk_score, is_active,
 			email_verified, totp_secret, is_totp_enabled, last_login,
-			failed_login_attempts, locked_until, created_at, updated_at
+			failed_login_attempts, locked_until, created_at, updated_at,
+			bio, city, postal_code, tax_id
 		FROM customer_schema.users WHERE email_hash = $1`
 
 	err := r.db.GetContext(ctx, &user, query, emailHash)
@@ -266,21 +264,23 @@ func (r *UserRepository) Update(ctx context.Context, user *domain.User) error {
 			user_type = $5, kyc_level = $6, kyc_status = $7, last_login = $8,
 			password_hash = $9, failed_login_attempts = $10, locked_until = $11,
 			updated_at = $12, email_hash = $13, phone_hash = $14,
-			totp_secret = $15, is_totp_enabled = $16
-		WHERE id = $17
+			totp_secret = $15, is_totp_enabled = $16,
+			bio = $17, city = $18, postal_code = $19, tax_id = $20
+		WHERE id = $21
 	`
 
 	_, err = r.db.ExecContext(ctx, query,
 		encEmail, encPhone, encFirstName, encLastName,
 		user.UserType, user.KYCLevel, user.KYCStatus, user.LastLogin,
 		user.PasswordHash, user.FailedLoginAttempts, user.LockedUntil,
-		user.UpdatedAt, emailHash, phoneHash, encTOTPSecret, user.IsTOTPEnabled, user.ID,
+		user.UpdatedAt, emailHash, phoneHash, encTOTPSecret, user.IsTOTPEnabled,
+		user.Bio, user.City, user.PostalCode, user.TaxID,
+		user.ID,
 	)
 
 	return errors.Wrap(err, "failed to update user")
 }
 
-// SetEmailVerified marks a user's email as verified.
 func (r *UserRepository) SetEmailVerified(ctx context.Context, id uuid.UUID) error {
 	query := `
 		UPDATE customer_schema.users SET
@@ -292,7 +292,6 @@ func (r *UserRepository) SetEmailVerified(ctx context.Context, id uuid.UUID) err
 	return errors.Wrap(err, "failed to set email verified")
 }
 
-// UpdateLoginSecurity updates failed login attempts and lock status.
 func (r *UserRepository) UpdateLoginSecurity(ctx context.Context, id uuid.UUID, attempts int, lockedUntil *time.Time) error {
 	query := `
 		UPDATE customer_schema.users SET
@@ -308,379 +307,85 @@ func (r *UserRepository) UpdateLoginSecurity(ctx context.Context, id uuid.UUID, 
 func (r *UserRepository) FindAll(ctx context.Context, limit, offset int, userType string) ([]*domain.User, error) {
 	var users []*domain.User
 	query := `
-			SELECT 
+		SELECT 
 			id, email, phone, first_name, last_name, user_type, kyc_level, kyc_status,
 			country_code, date_of_birth, business_name, risk_score, is_active,
-			failed_login_attempts, locked_until, last_login, created_at, updated_at
-			FROM customer_schema.users
-			WHERE ($3 = '' OR user_type = $3)
-			ORDER BY created_at DESC
-			LIMIT $1 OFFSET $2
-		`
-	err := r.db.SelectContext(ctx, &users, query, limit, offset, userType)
+			failed_login_attempts, locked_until, last_login, created_at, updated_at,
+			bio, city, postal_code, tax_id
+		FROM customer_schema.users
+	`
+	args := []interface{}{}
+	if userType != "" {
+		query += ` WHERE user_type = $1`
+		args = append(args, userType)
+	}
+	query += ` ORDER BY created_at DESC LIMIT $` + fmt.Sprint(len(args)+1) + ` OFFSET $` + fmt.Sprint(len(args)+2)
+	args = append(args, limit, offset)
+
+	err := r.db.SelectContext(ctx, &users, query, args...)
 	if err != nil {
-		return nil, errors.Wrap(err, "failed to list users")
+		return nil, errors.Wrap(err, "failed to find all users")
 	}
 
-	fmt.Printf("FindAll: Found %d users. Decrypting...\n", len(users))
-	for i, user := range users {
-		fmt.Printf("FindAll: Decrypting user %d: ID=%s, EmailLen=%d\n", i, user.ID, len(user.Email))
+	for _, user := range users {
 		if err := r.decryptUser(user); err != nil {
-			fmt.Printf("FindAll: Decryption failed for user %s: %v\n", user.ID, err)
 			return nil, err
 		}
-		fmt.Printf("FindAll: Decrypted user %d: Email=%s\n", i, user.Email)
 	}
-
 	return users, nil
 }
 
 func (r *UserRepository) CountAll(ctx context.Context, userType string) (int, error) {
-	var total int
-	query := `SELECT COUNT(*) FROM customer_schema.users WHERE ($1 = '' OR user_type = $1)`
-	err := r.db.GetContext(ctx, &total, query, userType)
-	if err != nil {
-		return 0, errors.Wrap(err, "failed to count users")
+	var count int
+	query := `SELECT COUNT(*) FROM customer_schema.users`
+	args := []interface{}{}
+	if userType != "" {
+		query += ` WHERE user_type = $1`
+		args = append(args, userType)
 	}
-	return total, nil
+	err := r.db.GetContext(ctx, &count, query, args...)
+	return count, errors.Wrap(err, "failed to count users")
 }
 
 func (r *UserRepository) FindAllByKYCStatus(ctx context.Context, status string, limit, offset int) ([]*domain.User, error) {
 	var users []*domain.User
 	query := `
-			SELECT 
+		SELECT 
 			id, email, phone, first_name, last_name, user_type, kyc_level, kyc_status,
 			country_code, date_of_birth, business_name, risk_score, is_active,
-			failed_login_attempts, locked_until, last_login, created_at, updated_at
-			FROM customer_schema.users
-			WHERE ($3 = '' OR kyc_status = $3)
-			ORDER BY created_at ASC
-			LIMIT $1 OFFSET $2
-		`
-	err := r.db.SelectContext(ctx, &users, query, limit, offset, status)
+			failed_login_attempts, locked_until, last_login, created_at, updated_at,
+			bio, city, postal_code, tax_id
+		FROM customer_schema.users
+		WHERE kyc_status = $1
+		ORDER BY updated_at DESC
+		LIMIT $2 OFFSET $3
+	`
+	err := r.db.SelectContext(ctx, &users, query, status, limit, offset)
 	if err != nil {
-		return nil, errors.Wrap(err, "failed to list users by kyc status")
+		return nil, errors.Wrap(err, "failed to find users by kyc status")
 	}
-
 	for _, user := range users {
 		if err := r.decryptUser(user); err != nil {
 			return nil, err
 		}
 	}
-
 	return users, nil
 }
 
 func (r *UserRepository) CountAllByKYCStatus(ctx context.Context, status string) (int, error) {
-	var total int
-	query := `SELECT COUNT(*) FROM customer_schema.users WHERE ($1 = '' OR kyc_status = $1)`
-	err := r.db.GetContext(ctx, &total, query, status)
-	if err != nil {
-		return 0, errors.Wrap(err, "failed to count users by kyc status")
-	}
-	return total, nil
-}
-
-// WALLET REPOSITORY - internal/repository/postgres/wallet.go
-type WalletRepository struct {
-	db *sqlx.DB
-}
-
-func NewWalletRepository(db *sqlx.DB) *WalletRepository {
-	return &WalletRepository{db: db}
-}
-
-func (r *WalletRepository) Create(ctx context.Context, wallet *domain.Wallet) error {
-	query := `
-		INSERT INTO customer_schema.wallets (
-			id, user_id, wallet_address, currency, available_balance,
-			ledger_balance, reserved_balance, status, created_at, updated_at
-		) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)
-	`
-
-	_, err := r.db.ExecContext(ctx, query,
-		wallet.ID, wallet.UserID, wallet.WalletAddress, wallet.Currency,
-		wallet.AvailableBalance, wallet.LedgerBalance, wallet.ReservedBalance,
-		wallet.Status, wallet.CreatedAt, wallet.UpdatedAt,
-	)
-
-	return errors.Wrap(err, "failed to create wallet")
-}
-
-func (r *WalletRepository) FindByID(ctx context.Context, id uuid.UUID) (*domain.Wallet, error) {
-	var wallet domain.Wallet
-	query := `SELECT * FROM customer_schema.wallets WHERE id = $1`
-
-	err := r.db.GetContext(ctx, &wallet, query, id)
-	if err == sql.ErrNoRows {
-		return nil, errors.ErrWalletNotFound
-	}
-	if err != nil {
-		return nil, errors.Wrap(err, "failed to find wallet")
-	}
-
-	return &wallet, nil
-}
-
-func (r *WalletRepository) FindByUserID(ctx context.Context, userID uuid.UUID) ([]*domain.Wallet, error) {
-	var wallets []*domain.Wallet
-	query := `SELECT * FROM customer_schema.wallets WHERE user_id = $1 ORDER BY created_at DESC`
-
-	err := r.db.SelectContext(ctx, &wallets, query, userID)
-	if err != nil {
-		return nil, errors.Wrap(err, "failed to find wallets")
-	}
-
-	return wallets, nil
-}
-
-func (r *WalletRepository) Count(ctx context.Context) (int, error) {
 	var count int
-	query := `SELECT COUNT(*) FROM customer_schema.wallets`
-	err := r.db.GetContext(ctx, &count, query)
-	if err != nil {
-		return 0, errors.Wrap(err, "failed to count wallets")
-	}
-	return count, nil
+	query := `SELECT COUNT(*) FROM customer_schema.users WHERE kyc_status = $1`
+	err := r.db.GetContext(ctx, &count, query, status)
+	return count, errors.Wrap(err, "failed to count users by kyc status")
 }
 
-func (r *WalletRepository) FindByIDs(ctx context.Context, ids []uuid.UUID) ([]*domain.Wallet, error) {
-	if len(ids) == 0 {
-		return []*domain.Wallet{}, nil
-	}
-	var wallets []*domain.Wallet
-	query, args, err := sqlx.In(`SELECT * FROM customer_schema.wallets WHERE id IN (?)`, ids)
-	if err != nil {
-		return nil, errors.Wrap(err, "failed to build query")
-	}
-	query = r.db.Rebind(query)
-
-	err = r.db.SelectContext(ctx, &wallets, query, args...)
-	if err != nil {
-		return nil, errors.Wrap(err, "failed to find wallets by ids")
-	}
-	return wallets, nil
-}
-
-func (r *WalletRepository) FindAllWithFilter(ctx context.Context, limit, offset int, userID *uuid.UUID) ([]*domain.Wallet, error) {
-	var wallets []*domain.Wallet
-	query := `SELECT * FROM customer_schema.wallets`
-	args := []interface{}{}
-
-	if userID != nil {
-		query += ` WHERE user_id = $1`
-		args = append(args, *userID)
-	}
-
-	query += ` ORDER BY created_at DESC LIMIT `
-	if userID != nil {
-		query += `$2 OFFSET $3`
-		args = append(args, limit, offset)
-	} else {
-		query += `$1 OFFSET $2`
-		args = append(args, limit, offset)
-	}
-
-	err := r.db.SelectContext(ctx, &wallets, query, args...)
-	if err != nil {
-		return nil, errors.Wrap(err, "failed to find wallets with filter")
-	}
-
-	return wallets, nil
-}
-
-func (r *WalletRepository) CountWithFilter(ctx context.Context, userID *uuid.UUID) (int, error) {
-	var count int
-	query := `SELECT COUNT(*) FROM customer_schema.wallets`
-	args := []interface{}{}
-
-	if userID != nil {
-		query += ` WHERE user_id = $1`
-		args = append(args, *userID)
-	}
-
-	err := r.db.GetContext(ctx, &count, query, args...)
-	if err != nil {
-		return 0, errors.Wrap(err, "failed to count wallets with filter")
-	}
-	return count, nil
-}
-
-func (r *WalletRepository) FindAll(ctx context.Context, limit, offset int) ([]*domain.Wallet, error) {
-	return r.FindAllWithFilter(ctx, limit, offset, nil)
-}
-
-func (r *WalletRepository) FindByUserAndCurrency(ctx context.Context, userID uuid.UUID, currency domain.Currency) (*domain.Wallet, error) {
-	var wallet domain.Wallet
-	query := `SELECT * FROM customer_schema.wallets WHERE user_id = $1 AND currency = $2`
-
-	err := r.db.GetContext(ctx, &wallet, query, userID, currency)
-	if err == sql.ErrNoRows {
-		return nil, errors.ErrWalletNotFound
-	}
-	if err != nil {
-		return nil, errors.Wrap(err, "failed to find wallet")
-	}
-
-	return &wallet, nil
-}
-
-func (r *WalletRepository) FindByAddress(ctx context.Context, address string) (*domain.Wallet, error) {
-	var wallet domain.Wallet
-	query := `SELECT * FROM customer_schema.wallets WHERE wallet_address = $1`
-	err := r.db.GetContext(ctx, &wallet, query, address)
-	if err == sql.ErrNoRows {
-		return nil, errors.ErrWalletNotFound
-	}
-	if err != nil {
-		return nil, errors.Wrap(err, "failed to find wallet by address")
-	}
-	return &wallet, nil
-}
-
-func (r *WalletRepository) SearchByAddress(ctx context.Context, partialAddress string, limit int) ([]*domain.Wallet, error) {
-	var wallets []*domain.Wallet
-	query := `SELECT * FROM customer_schema.wallets WHERE wallet_address LIKE $1 LIMIT $2`
-	// Add wildcards for partial match
-	searchPattern := "%" + partialAddress + "%"
-
-	err := r.db.SelectContext(ctx, &wallets, query, searchPattern, limit)
-	if err != nil {
-		return nil, errors.Wrap(err, "failed to search wallets")
-	}
-	return wallets, nil
-}
-
-func (r *WalletRepository) DebitWallet(ctx context.Context, walletID uuid.UUID, amount decimal.Decimal) error {
+func (r *UserRepository) UpdateKYCStatus(ctx context.Context, userID uuid.UUID, status domain.KYCStatus) error {
 	query := `
-		UPDATE customer_schema.wallets 
-		SET available_balance = available_balance - $1,
-		    ledger_balance = ledger_balance - $1,
-		    updated_at = NOW()
-		WHERE id = $2 AND available_balance >= $1
-	`
-
-	result, err := r.db.ExecContext(ctx, query, amount, walletID)
-	if err != nil {
-		return errors.Wrap(err, "failed to debit wallet")
-	}
-
-	rows, err := result.RowsAffected()
-	if err != nil {
-		return err
-	}
-	if rows == 0 {
-		return errors.ErrInsufficientBalance
-	}
-
-	return nil
-}
-
-func (r *WalletRepository) CreditWallet(ctx context.Context, walletID uuid.UUID, amount decimal.Decimal) error {
-	query := `
-		UPDATE customer_schema.wallets 
-		SET available_balance = available_balance + $1,
-		    ledger_balance = ledger_balance + $1,
-		    last_transaction_at = NOW(),
-		    updated_at = NOW()
+		UPDATE customer_schema.users SET
+			kyc_status = $1,
+			updated_at = NOW()
 		WHERE id = $2
 	`
-
-	_, err := r.db.ExecContext(ctx, query, amount, walletID)
-	return errors.Wrap(err, "failed to credit wallet")
-}
-
-func (r *WalletRepository) ReserveFunds(ctx context.Context, walletID uuid.UUID, amount decimal.Decimal) error {
-	query := `
-		UPDATE customer_schema.wallets 
-		SET available_balance = available_balance - $1,
-		    reserved_balance = reserved_balance + $1,
-		    updated_at = NOW()
-		WHERE id = $2 AND available_balance >= $1
-	`
-
-	result, err := r.db.ExecContext(ctx, query, amount, walletID)
-	if err != nil {
-		return errors.Wrap(err, "failed to reserve funds")
-	}
-
-	rows, err := result.RowsAffected()
-	if err != nil {
-		return err
-	}
-	if rows == 0 {
-		return errors.ErrInsufficientBalance
-	}
-
-	return nil
-}
-
-func (r *WalletRepository) Update(ctx context.Context, wallet *domain.Wallet) error {
-	query := `
-		UPDATE customer_schema.wallets SET
-			available_balance = $1,
-			ledger_balance = $2,
-			reserved_balance = $3,
-			status = $4,
-			updated_at = $5
-		WHERE id = $6
-	`
-
-	_, err := r.db.ExecContext(ctx, query,
-		wallet.AvailableBalance, wallet.LedgerBalance, wallet.ReservedBalance,
-		wallet.Status, wallet.UpdatedAt, wallet.ID,
-	)
-
-	return errors.Wrap(err, "failed to update wallet")
-}
-
-func (r *WalletRepository) UpdateWalletAddress(ctx context.Context, walletID uuid.UUID, address string) error {
-	query := `UPDATE customer_schema.wallets SET wallet_address = $1, updated_at = NOW() WHERE id = $2`
-	_, err := r.db.ExecContext(ctx, query, address, walletID)
-	return errors.Wrap(err, "failed to update wallet address")
-}
-
-func (r *WalletRepository) Delete(ctx context.Context, id uuid.UUID) error {
-	query := `DELETE FROM customer_schema.wallets WHERE id = $1`
-	_, err := r.db.ExecContext(ctx, query, id)
-	return errors.Wrap(err, "failed to delete wallet")
-}
-
-func (r *WalletRepository) DeleteLedgerEntriesByWalletID(ctx context.Context, walletID uuid.UUID) error {
-	query := `DELETE FROM customer_schema.ledger_entries WHERE wallet_id = $1`
-	_, err := r.db.ExecContext(ctx, query, walletID)
-	return errors.Wrap(err, "failed to delete ledger entries by wallet")
-}
-
-func (r *UserRepository) FindByKYCStatus(ctx context.Context, status string, limit, offset int) ([]*domain.User, int, error) {
-	var users []*domain.User
-	query := `
-		SELECT 
-			id, email, phone, first_name, last_name, user_type, kyc_level, kyc_status,
-			country_code, date_of_birth, business_name, risk_score, is_active,
-			failed_login_attempts, locked_until, last_login, created_at, updated_at
-		FROM customer_schema.users
-		WHERE kyc_status = $1
-		ORDER BY created_at DESC
-		LIMIT $2 OFFSET $3
-	`
-	err := r.db.SelectContext(ctx, &users, query, status, limit, offset)
-	if err != nil {
-		return nil, 0, errors.Wrap(err, "failed to list users by kyc status")
-	}
-
-	var total int
-	countQuery := `SELECT COUNT(*) FROM customer_schema.users WHERE kyc_status = $1`
-	err = r.db.GetContext(ctx, &total, countQuery, status)
-	if err != nil {
-		return nil, 0, errors.Wrap(err, "failed to count users by kyc status")
-	}
-
-	for _, user := range users {
-		if err := r.decryptUser(user); err != nil {
-			return nil, 0, err
-		}
-	}
-
-	return users, total, nil
+	_, err := r.db.ExecContext(ctx, query, status, userID)
+	return errors.Wrap(err, "failed to update kyc status")
 }

@@ -94,7 +94,7 @@ func main() {
 	userRepo := postgres.NewUserRepository(db, cryptoSvc)
 	walletRepo := postgres.NewWalletRepository(db)
 	txRepo := postgres.NewTransactionRepository(db)
-	auditRepo := postgres.NewAuditRepository(db)
+	auditRepo := postgres.NewAuditRepository(db, cryptoSvc)
 	securityRepo := postgres.NewSecurityRepository(db)
 
 	forexRepo := postgres.NewForexRepository(db)

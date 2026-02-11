@@ -1,6 +1,4 @@
-// ==============================================================================
-// COMPLETE PAYMENT SERVICE MAIN - cmd/payment/main.go
-// ==============================================================================
+// Package main is the entry point for the payment service.
 package main
 
 import (
@@ -26,8 +24,12 @@ import (
 	"github.com/redis/go-redis/v9"
 	"golang.org/x/crypto/bcrypt"
 
+	"kyd/internal/analytics"
+	"kyd/internal/auth"
+	"kyd/internal/blockchain"
 	"kyd/internal/blockchain/ripple"
 	"kyd/internal/blockchain/stellar"
+	"kyd/internal/compliance"
 	"kyd/internal/domain"
 	"kyd/internal/forex"
 	"kyd/internal/handler"
@@ -135,13 +137,19 @@ func main() {
 	forexRepo := postgres.NewForexRepository(db)
 	userRepo := postgres.NewUserRepository(db, cryptoService)
 	settlementRepo := postgres.NewSettlementRepository(db)
-	auditRepo := postgres.NewAuditRepository(db)
+	auditRepo := postgres.NewAuditRepository(db, cryptoService)
 	ledgerRepo := postgres.NewLedgerRepository(db)
 	securityRepo := postgres.NewSecurityRepository(db)
+	blockchainRepo := postgres.NewBlockchainNetworkRepository(db)
+	kycRepo := postgres.NewKYCRepository(db)
+	apiKeyRepo := postgres.NewAPIKeyRepository(db)
 
 	// Initialize services
 	ledgerService := ledger.NewService(db, ledgerRepo)
 	securityService := security.NewService(securityRepo)
+	blockchainService := blockchain.NewService(blockchainRepo)
+	complianceService := compliance.NewService(kycRepo, userRepo)
+	apiKeyService := auth.NewAPIKeyService(apiKeyRepo)
 
 	// Initialize blockchain connectors
 	stellarConnector, err := stellar.NewConnector(
@@ -172,6 +180,7 @@ func main() {
 
 	// Initialize forex providers
 	forexProviders := []forex.RateProvider{
+		forex.NewGoogleFinanceProvider(), // Try Google Finance first
 		forex.NewMockRateProvider(),
 		forex.NewExchangeRateAPIProvider(),
 	}
@@ -192,6 +201,14 @@ func main() {
 	walletHandler := handler.NewWalletHandler(walletService, val, log)
 	securityHandler := handler.NewSecurityHandler(securityService, val)
 	forexHandler := handler.NewForexHandler(forexService, val, log)
+	blockchainHandler := handler.NewBlockchainHandler(blockchainService)
+	complianceHandler := handler.NewComplianceHandler(complianceService, log)
+	apiKeyHandler := handler.NewAPIKeyHandler(apiKeyService, log)
+	systemHandler := handler.NewSystemHandler(db, redisClient, auditRepo, log)
+
+	// Initialize analytics
+	analyticsEngine := analytics.NewAnalyticsEngine()
+	analyticsHandler := handler.NewAnalyticsHandler(analyticsEngine, log)
 
 	// Setup router
 	r := mux.NewRouter()
@@ -258,109 +275,65 @@ func main() {
 	api.HandleFunc("/transactions/{id}/receipt", paymentHandler.GetReceipt).Methods("GET")
 	api.HandleFunc("/disputes", paymentHandler.InitiateDispute).Methods("POST")
 
+	// Compliance
+	api.HandleFunc("/compliance/kyc/submit", complianceHandler.SubmitKYC).Methods("POST")
+	api.HandleFunc("/compliance/kyc/status", complianceHandler.GetKYCStatus).Methods("GET")
+
+	// Static files for KYC Documents (Served via API to ensure Auth)
+	// Maps /api/v1/uploads/kyc/... to ./uploads/kyc/...
+	// Note: We use a raw handler here, wrapping it manually if needed,
+	// but since it's on 'api' subrouter, it inherits authMW.
+	api.PathPrefix("/uploads/kyc/").Handler(
+		http.StripPrefix("/api/v1/uploads/kyc/", http.FileServer(http.Dir("./uploads/kyc"))),
+	).Methods("GET")
+
 	// Forex routes
 	api.HandleFunc("/forex/rates", forexHandler.GetAllRates).Methods("GET")
+	api.HandleFunc("/forex/history", forexHandler.GetHistory).Methods("GET")
 	api.HandleFunc("/forex/calculate", forexHandler.Calculate).Methods("POST")
 
 	// Admin routes
 	admin := api.PathPrefix("/admin").Subrouter()
 	admin.Use(middleware.NewRateLimiter(redisClient, 60, time.Minute).WithAdaptive(5, 15*time.Minute).Limit)
+
+	// Admin: Analytics
+	admin.HandleFunc("/analytics/earnings", analyticsHandler.GetEarningsReport).Methods("GET")
+
+	// Admin: API Keys
+	admin.HandleFunc("/api-keys", apiKeyHandler.ListAPIKeys).Methods("GET")
+	admin.HandleFunc("/api-keys", apiKeyHandler.CreateAPIKey).Methods("POST")
+	admin.HandleFunc("/api-keys/{id}", apiKeyHandler.RevokeAPIKey).Methods("DELETE")
+
+	// Admin: Compliance
+	admin.HandleFunc("/compliance/applications", complianceHandler.ListApplications).Methods("GET")
+	admin.HandleFunc("/compliance/applications/{id}/review", complianceHandler.ReviewApplication).Methods("POST")
+
 	// Admin: Transaction Management
 	admin.HandleFunc("/transactions", paymentHandler.GetAllTransactions).Methods("GET")
 	admin.HandleFunc("/transactions/pending", paymentHandler.GetPendingTransactions).Methods("GET")
 	admin.HandleFunc("/transactions/{id}/review", paymentHandler.ReviewTransaction).Methods("POST")
-	admin.HandleFunc("/stats", paymentHandler.GetSystemStats).Methods("GET")
+	admin.HandleFunc("/analytics/metrics", paymentHandler.GetSystemStats).Methods("GET")
+	admin.HandleFunc("/analytics/earnings", analyticsHandler.GetEarningsReport).Methods("GET")
 	admin.HandleFunc("/analytics/volume", paymentHandler.GetTransactionVolume).Methods("GET")
 	admin.HandleFunc("/risk/alerts", paymentHandler.GetRiskAlerts).Methods("GET")
-	admin.HandleFunc("/audit-logs", paymentHandler.GetAuditLogs).Methods("GET")
+	admin.HandleFunc("/audit-logs", systemHandler.GetAuditLogs).Methods("GET")
 	admin.HandleFunc("/disputes", paymentHandler.GetDisputes).Methods("GET")
 	admin.HandleFunc("/disputes/resolve", paymentHandler.ResolveDispute).Methods("POST")
 
 	// Admin: Compliance
-	admin.HandleFunc("/compliance/kyc", func(w http.ResponseWriter, r *http.Request) {
-		ut, _ := middleware.UserTypeFromContext(r.Context())
-		if ut != "admin" {
-			w.WriteHeader(http.StatusForbidden)
-			w.Write([]byte(`{"error":"admin access required"}`))
-			return
-		}
-		limit := 50
-		offset := 0
-		if v := r.URL.Query().Get("limit"); v != "" {
-			if n, err := strconv.Atoi(v); err == nil && n > 0 {
-				limit = n
-			}
-		}
-		if v := r.URL.Query().Get("offset"); v != "" {
-			if n, err := strconv.Atoi(v); err == nil && n >= 0 {
-				offset = n
-			}
-		}
+	admin.HandleFunc("/compliance/kyc", complianceHandler.ListApplications).Methods("GET")
+	admin.HandleFunc("/compliance/kyc/{id}/status", complianceHandler.ReviewApplication).Methods("PATCH")
 
-		status := r.URL.Query().Get("status")
-		var users []*domain.User
-		var total int
-		var err error
+	admin.HandleFunc("/system/status", systemHandler.GetSystemStatus).Methods("GET")
 
-		if status != "" {
-			users, err = userRepo.FindAllByKYCStatus(r.Context(), status, limit, offset)
-			if err == nil {
-				total, _ = userRepo.CountAllByKYCStatus(r.Context(), status)
-			}
-		} else {
-			// If no status specified, fetch all users (filtering for non-empty KYC could be added here)
-			// For now, fetching all users to populate the queue
-			users, err = userRepo.FindAll(r.Context(), limit, offset, "")
-			if err == nil {
-				total, _ = userRepo.CountAll(r.Context(), "")
-			}
-		}
+	// Admin: Blockchain Network Management
+	admin.HandleFunc("/blockchain/networks", blockchainHandler.ListNetworks).Methods("GET")
+	admin.HandleFunc("/blockchain/networks", blockchainHandler.CreateNetwork).Methods("POST")
+	admin.HandleFunc("/blockchain/networks/{id}", blockchainHandler.GetNetwork).Methods("GET")
+	admin.HandleFunc("/blockchain/networks/{id}", blockchainHandler.UpdateNetwork).Methods("PUT", "PATCH")
+	admin.HandleFunc("/blockchain/networks/{id}", blockchainHandler.DeleteNetwork).Methods("DELETE")
 
-		if err != nil {
-			log.Error("Failed to fetch kyc applications", map[string]interface{}{"error": err.Error()})
-			w.WriteHeader(http.StatusInternalServerError)
-			return
-		}
-
-		// Map Users to KYCApplication
-		type KYCApplication struct {
-			ID          uuid.UUID   `json:"id"`
-			UserID      uuid.UUID   `json:"user_id"`
-			Status      string      `json:"status"`
-			SubmittedAt time.Time   `json:"submitted_at"`
-			ReviewedAt  *time.Time  `json:"reviewed_at,omitempty"`
-			ReviewerID  *uuid.UUID  `json:"reviewer_id,omitempty"`
-			Documents   interface{} `json:"documents,omitempty"`
-			Name        string      `json:"name"`  // Added for frontend convenience
-			Email       string      `json:"email"` // Added for frontend convenience
-		}
-
-		apps := make([]KYCApplication, len(users))
-		for i, u := range users {
-			// Use CreatedAt or UpdatedAt as proxy for submission time
-			submitted := u.UpdatedAt
-			if submitted.IsZero() {
-				submitted = u.CreatedAt
-			}
-
-			apps[i] = KYCApplication{
-				ID:          u.ID, // Using UserID as ApplicationID for simplicity 1:1
-				UserID:      u.ID,
-				Status:      string(u.KYCStatus),
-				SubmittedAt: submitted,
-				Name:        u.FirstName + " " + u.LastName,
-				Email:       u.Email,
-			}
-		}
-
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]interface{}{
-			"applications": apps,
-			"total":        total,
-			"limit":        limit,
-			"offset":       offset,
-		})
-	}).Methods("GET")
+	// Duplicate compliance route removed
 
 	admin.HandleFunc("/compliance/reports", func(w http.ResponseWriter, r *http.Request) {
 		ut, _ := middleware.UserTypeFromContext(r.Context())
@@ -642,49 +615,7 @@ func main() {
 		w.Write([]byte(`{"message":"kyc status updated successfully"}`))
 	}).Methods("PATCH")
 
-	admin.HandleFunc("/blockchain/networks", func(w http.ResponseWriter, r *http.Request) {
-		ut, _ := middleware.UserTypeFromContext(r.Context())
-		if ut != "admin" {
-			w.WriteHeader(http.StatusForbidden)
-			w.Write([]byte(`{"error":"admin access required"}`))
-			return
-		}
-
-		type BlockchainNetwork struct {
-			NetworkID     string `json:"network_id"`
-			Name          string `json:"name"`
-			Status        string `json:"status"`
-			Height        int    `json:"height"`
-			PeerCount     int    `json:"peer_count"`
-			LastBlockTime string `json:"last_block_time"`
-			Channel       string `json:"channel"`
-		}
-
-		// Mocked networks
-		networks := []BlockchainNetwork{
-			{
-				NetworkID:     "net-stellar-test",
-				Name:          "Stellar Testnet",
-				Status:        "active",
-				Height:        123456,
-				PeerCount:     15,
-				LastBlockTime: time.Now().Format(time.RFC3339),
-				Channel:       "public",
-			},
-			{
-				NetworkID:     "net-hyperledger-kyd",
-				Name:          "Hyperledger Fabric KYD",
-				Status:        "active",
-				Height:        5678,
-				PeerCount:     4,
-				LastBlockTime: time.Now().Add(-2 * time.Second).Format(time.RFC3339),
-				Channel:       "kyd-channel",
-			},
-		}
-
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]interface{}{"networks": networks})
-	}).Methods("GET")
+	admin.HandleFunc("/blockchain/networks", blockchainHandler.ListNetworks).Methods("GET")
 
 	admin.HandleFunc("/blockchain/transactions", func(w http.ResponseWriter, r *http.Request) {
 		ut, _ := middleware.UserTypeFromContext(r.Context())
@@ -823,131 +754,9 @@ func main() {
 		json.NewEncoder(w).Encode(map[string]interface{}{"reports": []EarningsReport{report}})
 	}).Methods("GET")
 
-	admin.HandleFunc("/compliance/kyc", func(w http.ResponseWriter, r *http.Request) {
-		ut, _ := middleware.UserTypeFromContext(r.Context())
-		if ut != "admin" {
-			w.WriteHeader(http.StatusForbidden)
-			w.Write([]byte(`{"error":"admin access required"}`))
-			return
-		}
-		status := r.URL.Query().Get("status")
-		limit := 50
-		offset := 0
-		// Parsing limit/offset omitted for brevity, using defaults if err
+	admin.HandleFunc("/compliance/kyc", complianceHandler.ListApplications).Methods("GET")
 
-		var users []*domain.User
-		var total int
-		var err error
-
-		if status != "" {
-			users, total, err = userRepo.FindByKYCStatus(r.Context(), status, limit, offset)
-		} else {
-			users, err = userRepo.FindAll(r.Context(), limit, offset, "")
-			total, _ = userRepo.CountAll(r.Context(), "")
-		}
-
-		if err != nil {
-			log.Error("Failed to fetch kyc applications", map[string]interface{}{"error": err.Error()})
-			w.WriteHeader(http.StatusInternalServerError)
-			return
-		}
-
-		type KYCApplication struct {
-			ID           string        `json:"id"`
-			CustomerID   string        `json:"customerId"`
-			CustomerName string        `json:"customerName"`
-			CustomerType string        `json:"customerType"`
-			SubmittedAt  time.Time     `json:"submittedAt"`
-			Status       string        `json:"status"`
-			RiskLevel    string        `json:"riskLevel"`
-			RiskScore    float64       `json:"riskScore"`
-			Documents    []interface{} `json:"documents"`
-		}
-
-		apps := make([]KYCApplication, len(users))
-		for i, u := range users {
-			name := u.FirstName + " " + u.LastName
-			if u.BusinessName != nil && *u.BusinessName != "" {
-				name = *u.BusinessName
-			}
-
-			score := u.RiskScore.InexactFloat64()
-			riskLevel := "low"
-			if score > 80 {
-				riskLevel = "critical"
-			} else if score > 60 {
-				riskLevel = "high"
-			} else if score > 30 {
-				riskLevel = "medium"
-			}
-
-			apps[i] = KYCApplication{
-				ID:           u.ID.String(),
-				CustomerID:   u.ID.String(),
-				CustomerName: name,
-				CustomerType: string(u.UserType),
-				SubmittedAt:  u.CreatedAt,
-				Status:       string(u.KYCStatus),
-				RiskLevel:    riskLevel,
-				RiskScore:    score,
-				Documents:    []interface{}{},
-			}
-		}
-
-		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]interface{}{"applications": apps, "total": total})
-	}).Methods("GET")
-
-	admin.HandleFunc("/compliance/kyc/{id}/status", func(w http.ResponseWriter, r *http.Request) {
-		ut, _ := middleware.UserTypeFromContext(r.Context())
-		if ut != "admin" {
-			w.WriteHeader(http.StatusForbidden)
-			w.Write([]byte(`{"error":"admin access required"}`))
-			return
-		}
-		vars := mux.Vars(r)
-		id, err := uuid.Parse(vars["id"])
-		if err != nil {
-			w.WriteHeader(http.StatusBadRequest)
-			return
-		}
-
-		var req struct {
-			Status string `json:"status"`
-			Reason string `json:"reason"`
-		}
-		if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
-			w.WriteHeader(http.StatusBadRequest)
-			return
-		}
-
-		user, err := userRepo.FindByID(r.Context(), id)
-		if err != nil {
-			w.WriteHeader(http.StatusNotFound)
-			return
-		}
-
-		user.KYCStatus = domain.KYCStatus(req.Status)
-		if err := userRepo.Update(r.Context(), user); err != nil {
-			w.WriteHeader(http.StatusInternalServerError)
-			return
-		}
-
-		// Log audit
-		entityType := "user"
-		newVals := domain.Metadata{"status": req.Status, "reason": req.Reason}
-		newValsJSON, _ := json.Marshal(newVals)
-		auditRepo.Create(r.Context(), &domain.AuditLog{
-			UserID:     &id,
-			Action:     "KYC_UPDATE",
-			EntityType: entityType,
-			EntityID:   id.String(),
-			NewValues:  newValsJSON,
-		})
-
-		w.Header().Set("Content-Type", "application/json")
-		w.Write([]byte(`{"message":"status updated"}`))
-	}).Methods("PATCH")
+	admin.HandleFunc("/compliance/kyc/{id}/status", complianceHandler.ReviewApplication).Methods("PATCH")
 
 	// User KYC Status Update (Direct User Endpoint)
 	admin.HandleFunc("/users/{id}/kyc", func(w http.ResponseWriter, r *http.Request) {

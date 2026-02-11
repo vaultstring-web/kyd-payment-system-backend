@@ -156,9 +156,20 @@ func (s *Service) startRateUpdater() {
 
 func (s *Service) updateAllRates() {
 	ctx := context.Background()
-	pairs := []struct{ from, to domain.Currency }{
-		{domain.MWK, domain.CNY},
-		{domain.CNY, domain.MWK},
+
+	currencies := []domain.Currency{
+		domain.CNY, domain.ZMW,
+		domain.ZAR, domain.KES, domain.NGN, domain.GHS, domain.UGX, domain.TZS, domain.RWF,
+		domain.INR, domain.JPY, domain.KRW, domain.SGD, domain.HKD,
+		domain.EUR, domain.GBP, domain.CHF,
+	}
+
+	var pairs []struct{ from, to domain.Currency }
+
+	// Add pairs relative to MWK
+	for _, c := range currencies {
+		pairs = append(pairs, struct{ from, to domain.Currency }{domain.MWK, c})
+		pairs = append(pairs, struct{ from, to domain.Currency }{c, domain.MWK})
 	}
 
 	for _, pair := range pairs {

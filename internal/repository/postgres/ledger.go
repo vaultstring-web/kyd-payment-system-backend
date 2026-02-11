@@ -4,7 +4,6 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
-	"errors"
 	"fmt"
 	"time"
 
@@ -29,18 +28,20 @@ func NewLedgerRepository(db *sqlx.DB) *LedgerRepository {
 // CreateEntry adds a new entry to the ledger with hash chaining.
 // It handles optimistic locking by retrying if a race condition occurs on previous_hash.
 func (r *LedgerRepository) CreateEntry(ctx context.Context, txID uuid.UUID, eventType string, amount decimal.Decimal, currency domain.Currency, status string) error {
+	var lastErr error
 	maxRetries := 5
 	for i := 0; i < maxRetries; i++ {
 		err := r.tryCreateEntry(ctx, txID, eventType, amount, currency, status)
 		if err == nil {
 			return nil
 		}
+		lastErr = err
 		// If it's not a unique constraint violation, return error
 		// In a real app we'd check the specific error code (23505 for unique violation in Postgres)
 		// For now, simple retry logic
 		time.Sleep(10 * time.Millisecond)
 	}
-	return errors.New("failed to create ledger entry after max retries")
+	return fmt.Errorf("failed to create ledger entry after max retries: %w", lastErr)
 }
 
 func (r *LedgerRepository) tryCreateEntry(ctx context.Context, txID uuid.UUID, eventType string, amount decimal.Decimal, currency domain.Currency, status string) error {

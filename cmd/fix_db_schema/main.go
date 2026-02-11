@@ -46,5 +46,26 @@ func main() {
 		fmt.Println("✅ Index added.")
 	}
 
+	// Create blockchain_networks table
+	fmt.Println("Creating blockchain_networks table...")
+	blockchainTable := `
+	CREATE TABLE IF NOT EXISTS customer_schema.blockchain_networks (
+		network_id VARCHAR(50) PRIMARY KEY,
+		name VARCHAR(100) NOT NULL,
+		status VARCHAR(20) NOT NULL,
+		block_height BIGINT DEFAULT 0,
+		peer_count INT DEFAULT 0,
+		last_block_time TIMESTAMP,
+		channel VARCHAR(50) DEFAULT 'default',
+		created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+		updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+	);`
+	_, err = db.Exec(blockchainTable)
+	if err != nil {
+		log.Printf("⚠️  Failed to create blockchain_networks table: %v", err)
+	} else {
+		fmt.Println("✅ blockchain_networks table created/verified.")
+	}
+
 	fmt.Println("🎉 Schema Fix Complete!")
 }

@@ -98,6 +98,10 @@ type updateUserRequest struct {
 	BusinessRegistration *string           `json:"business_registration" validate:"omitempty,max=128"`
 	IsActive             *bool             `json:"is_active"`
 	Password             *string           `json:"password" validate:"omitempty,min=8"`
+	Bio                  *string           `json:"bio" validate:"omitempty,max=500"`
+	City                 *string           `json:"city" validate:"omitempty,max=100"`
+	PostalCode           *string           `json:"postal_code" validate:"omitempty,max=20"`
+	TaxID                *string           `json:"tax_id" validate:"omitempty,max=50"`
 }
 
 func (h *UsersHandler) Update(w http.ResponseWriter, r *http.Request) {
@@ -165,6 +169,18 @@ func (h *UsersHandler) Update(w http.ResponseWriter, r *http.Request) {
 	if req.IsActive != nil {
 		user.IsActive = *req.IsActive
 	}
+	if req.Bio != nil {
+		user.Bio = *req.Bio
+	}
+	if req.City != nil {
+		user.City = *req.City
+	}
+	if req.PostalCode != nil {
+		user.PostalCode = *req.PostalCode
+	}
+	if req.TaxID != nil {
+		user.TaxID = *req.TaxID
+	}
 	// Sanitize user fields
 	auth.SanitizeUserInput(user)
 	// Handle password update
@@ -191,6 +207,10 @@ type updateMeRequest struct {
 	FirstName   *string `json:"first_name" validate:"omitempty,min=1,max=64"`
 	LastName    *string `json:"last_name" validate:"omitempty,min=1,max=64"`
 	CountryCode *string `json:"country_code" validate:"omitempty,len=2"`
+	Bio         *string `json:"bio" validate:"omitempty,max=500"`
+	City        *string `json:"city" validate:"omitempty,max=100"`
+	PostalCode  *string `json:"postal_code" validate:"omitempty,max=20"`
+	TaxID       *string `json:"tax_id" validate:"omitempty,max=50"`
 }
 
 func (h *UsersHandler) UpdateMe(w http.ResponseWriter, r *http.Request) {
@@ -227,6 +247,18 @@ func (h *UsersHandler) UpdateMe(w http.ResponseWriter, r *http.Request) {
 	}
 	if req.CountryCode != nil {
 		user.CountryCode = *req.CountryCode
+	}
+	if req.Bio != nil {
+		user.Bio = *req.Bio
+	}
+	if req.City != nil {
+		user.City = *req.City
+	}
+	if req.PostalCode != nil {
+		user.PostalCode = *req.PostalCode
+	}
+	if req.TaxID != nil {
+		user.TaxID = *req.TaxID
 	}
 	auth.SanitizeUserInput(user)
 	user.UpdatedAt = time.Now()

@@ -117,12 +117,8 @@ func (h *AnalyticsHandler) DetectAnomaly(w http.ResponseWriter, r *http.Request)
 
 // GetKPIs returns key performance indicators.
 func (h *AnalyticsHandler) GetKPIs(w http.ResponseWriter, r *http.Request) {
-	period := r.URL.Query().Get("period")
-	if period == "" {
-		period = "day"
-	}
-
-	kpis := h.engine.CalculateKPIs(r.Context(), period)
+	// For now, return all data as period was previously ignored
+	kpis := h.engine.CalculateKPIs(r.Context(), "", "")
 
 	h.respondJSON(w, http.StatusOK, kpis)
 }
@@ -130,12 +126,48 @@ func (h *AnalyticsHandler) GetKPIs(w http.ResponseWriter, r *http.Request) {
 // GetDashboard returns dashboard data.
 func (h *AnalyticsHandler) GetDashboard(w http.ResponseWriter, r *http.Request) {
 	dashboard := map[string]interface{}{
-		"kpis":       h.engine.CalculateKPIs(r.Context(), "day"),
-		"timestamp":  time.Now(),
-		"status":     "operational",
+		"kpis":      h.engine.CalculateKPIs(r.Context(), "", ""),
+		"timestamp": time.Now(),
+		"status":    "operational",
 	}
 
 	h.respondJSON(w, http.StatusOK, dashboard)
+}
+
+// EarningsReport represents the earnings report data.
+type EarningsReport struct {
+	Period                        string  `json:"period"`
+	TotalEarnings                 float64 `json:"total_earnings"`
+	TransactionCount              int     `json:"transaction_count"`
+	AverageEarningsPerTransaction float64 `json:"average_earnings_per_transaction"`
+	Currency                      string  `json:"currency"`
+}
+
+// GetEarningsReport returns the earnings report.
+func (h *AnalyticsHandler) GetEarningsReport(w http.ResponseWriter, r *http.Request) {
+	startDate := r.URL.Query().Get("start_date")
+	endDate := r.URL.Query().Get("end_date")
+
+	kpis := h.engine.CalculateKPIs(r.Context(), startDate, endDate)
+	revenue, _ := kpis.RevenueEstimate.Float64()
+
+	avgEarnings := 0.0
+	if kpis.TransactionCount > 0 {
+		avgEarnings = revenue / float64(kpis.TransactionCount)
+	}
+
+	report := EarningsReport{
+		Period:                        "current", // simplified
+		TotalEarnings:                 revenue,
+		TransactionCount:              kpis.TransactionCount,
+		AverageEarningsPerTransaction: avgEarnings,
+		Currency:                      "MWK", // Default currency
+	}
+
+	// Return as a list to match frontend expectation of { reports: [] }
+	h.respondJSON(w, http.StatusOK, map[string]interface{}{
+		"reports": []EarningsReport{report},
+	})
 }
 
 func (h *AnalyticsHandler) respondJSON(w http.ResponseWriter, status int, data interface{}) {

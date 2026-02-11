@@ -44,6 +44,9 @@ type Settlement = pkg.Settlement
 // BlockchainNetwork identifies supported settlement networks.
 type BlockchainNetwork = pkg.BlockchainNetwork
 
+// BlockchainNetworkInfo represents a blockchain network's configuration and status
+type BlockchainNetworkInfo = pkg.BlockchainNetworkInfo
+
 // SettlementStatus represents settlement lifecycle states.
 type SettlementStatus = pkg.SettlementStatus
 
@@ -70,6 +73,27 @@ const (
 	MWK = pkg.MWK
 	CNY = pkg.CNY
 	ZMW = pkg.ZMW
+
+	// Africa
+	ZAR = pkg.ZAR
+	KES = pkg.KES
+	NGN = pkg.NGN
+	GHS = pkg.GHS
+	UGX = pkg.UGX
+	TZS = pkg.TZS
+	RWF = pkg.RWF
+
+	// Asia
+	INR = pkg.INR
+	JPY = pkg.JPY
+	KRW = pkg.KRW
+	SGD = pkg.SGD
+	HKD = pkg.HKD
+
+	// Europe
+	EUR = pkg.EUR
+	GBP = pkg.GBP
+	CHF = pkg.CHF
 )
 
 // Re-exported user types.
@@ -94,6 +118,12 @@ const (
 	WalletStatusSuspended = pkg.WalletStatusSuspended
 	WalletStatusClosed    = pkg.WalletStatusClosed
 )
+
+// KYCDocument represents a user's KYC document.
+type KYCDocument = pkg.KYCDocument
+
+// APIKey represents an administrative API key.
+type APIKey = pkg.APIKey
 
 // Re-exported transaction statuses.
 const (

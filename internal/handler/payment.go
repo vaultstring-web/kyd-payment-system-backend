@@ -70,7 +70,17 @@ func (h *PaymentHandler) GetTransactions(w http.ResponseWriter, r *http.Request)
 		}
 	}
 
-	txs, total, err := h.service.GetUserTransactions(r.Context(), userID, limit, offset)
+	var walletID *uuid.UUID
+	if v := r.URL.Query().Get("wallet_id"); v != "" {
+		id, err := uuid.Parse(v)
+		if err != nil {
+			h.respondError(w, http.StatusBadRequest, "Invalid wallet ID")
+			return
+		}
+		walletID = &id
+	}
+
+	txs, total, err := h.service.GetUserTransactions(r.Context(), userID, walletID, limit, offset)
 	if err != nil {
 		h.logger.Error("Failed to fetch user transactions", map[string]interface{}{"error": err.Error()})
 		h.respondError(w, http.StatusInternalServerError, "Failed to fetch transactions")
@@ -451,6 +461,18 @@ func (h *PaymentHandler) decodeInitiatePaymentRequest(w http.ResponseWriter, r *
 	if !ok {
 		h.respondError(w, http.StatusUnauthorized, "Unauthorized")
 		return req, uuid.Nil, http.ErrNoCookie // Or appropriate error
+	}
+
+	// Enrich with device info from headers
+	req.DeviceID = r.Header.Get("X-Device-ID")
+	if req.DeviceID == "" {
+		// Fallback to User-Agent if Device-ID is missing, similar to auth handler
+		req.DeviceID = r.Header.Get("User-Agent")
+	}
+
+	// Enrich with Idempotency Key from headers if not in body
+	if req.Reference == "" {
+		req.Reference = r.Header.Get("Idempotency-Key")
 	}
 
 	return req, userID, nil

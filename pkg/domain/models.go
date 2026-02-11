@@ -23,6 +23,27 @@ const (
 	MWK Currency = "MWK" // Malawi Kwacha
 	CNY Currency = "CNY" // Chinese Yuan
 	ZMW Currency = "ZMW" // Zambian Kwacha
+
+	// Africa
+	ZAR Currency = "ZAR" // South African Rand
+	KES Currency = "KES" // Kenyan Shilling
+	NGN Currency = "NGN" // Nigerian Naira
+	GHS Currency = "GHS" // Ghanaian Cedi
+	UGX Currency = "UGX" // Ugandan Shilling
+	TZS Currency = "TZS" // Tanzanian Shilling
+	RWF Currency = "RWF" // Rwandan Franc
+
+	// Asia
+	INR Currency = "INR" // Indian Rupee
+	JPY Currency = "JPY" // Japanese Yen
+	KRW Currency = "KRW" // South Korean Won
+	SGD Currency = "SGD" // Singapore Dollar
+	HKD Currency = "HKD" // Hong Kong Dollar
+
+	// Europe
+	EUR Currency = "EUR" // Euro
+	GBP Currency = "GBP" // British Pound
+	CHF Currency = "CHF" // Swiss Franc
 )
 
 // User represents a system user
@@ -45,6 +66,10 @@ type User struct {
 	EmailVerified        bool            `json:"email_verified" db:"email_verified"`
 	TOTPSecret           *string         `json:"-" db:"totp_secret"`
 	IsTOTPEnabled        bool            `json:"is_totp_enabled" db:"is_totp_enabled"`
+	Bio                  string          `json:"bio,omitempty" db:"bio"`
+	City                 string          `json:"city,omitempty" db:"city"`
+	PostalCode           string          `json:"postal_code,omitempty" db:"postal_code"`
+	TaxID                string          `json:"tax_id,omitempty" db:"tax_id"`
 	LastLogin            *time.Time      `json:"last_login,omitempty" db:"last_login"`
 	FailedLoginAttempts  int             `json:"failed_login_attempts" db:"failed_login_attempts"`
 	LockedUntil          *time.Time      `json:"locked_until,omitempty" db:"locked_until"`
@@ -192,6 +217,12 @@ type ExchangeRate struct {
 	LastUpdated    time.Time       `json:"last_updated" db:"last_updated"`
 	CreatedAt      time.Time       `json:"created_at" db:"created_at"`
 	VolatilityRisk string          `json:"volatility_risk" db:"volatility_risk"`
+
+	// Market Stats (Transient/Cached)
+	Change24h     decimal.Decimal `json:"change_24h" db:"-"`
+	ChangePercent decimal.Decimal `json:"change_percent" db:"-"`
+	High24h       decimal.Decimal `json:"high_24h" db:"-"`
+	Low24h        decimal.Decimal `json:"low_24h" db:"-"`
 }
 
 // Settlement represents a daily settlement batch
@@ -232,6 +263,22 @@ const (
 	NetworkRipple       BlockchainNetwork = "ripple"
 	NetworkBankTransfer BlockchainNetwork = "bank_transfer"
 )
+
+// BlockchainNetworkInfo represents a blockchain network's configuration and status
+type BlockchainNetworkInfo struct {
+	ID            string     `json:"network_id" db:"network_id"`
+	Name          string     `json:"name" db:"name"`
+	Status        string     `json:"status" db:"status"` // healthy, degraded, down
+	BlockHeight   int64      `json:"height" db:"block_height"`
+	PeerCount     int        `json:"peer_count" db:"peer_count"`
+	LastBlockTime *time.Time `json:"last_block_time" db:"last_block_time"`
+	Channel       *string    `json:"channel" db:"channel"`
+	RpcURL        *string    `json:"rpc_url" db:"rpc_url"`
+	ChainID       *string    `json:"chain_id" db:"chain_id"`
+	Symbol        *string    `json:"symbol" db:"symbol"`
+	CreatedAt     time.Time  `json:"created_at" db:"created_at"`
+	UpdatedAt     time.Time  `json:"updated_at" db:"updated_at"`
+}
 
 type SettlementStatus string
 
@@ -358,3 +405,39 @@ const (
 	SecurityEventStatusResolved      = "resolved"
 	SecurityEventStatusFalsePositive = "false_positive"
 )
+
+// KYCDocument represents a user's KYC document
+type KYCDocument struct {
+	ID                 uuid.UUID  `json:"id" db:"id"`
+	UserID             uuid.UUID  `json:"user_id" db:"user_id"`
+	DocumentType       string     `json:"document_type" db:"document_type"`
+	DocumentNumber     *string    `json:"document_number" db:"document_number"`
+	IssuingCountry     *string    `json:"issuing_country" db:"issuing_country"`
+	IssueDate          *time.Time `json:"issue_date" db:"issue_date"`
+	ExpiryDate         *time.Time `json:"expiry_date" db:"expiry_date"`
+	FrontImageURL      *string    `json:"front_image_url" db:"front_image_url"`
+	BackImageURL       *string    `json:"back_image_url" db:"back_image_url"`
+	SelfieImageURL     *string    `json:"selfie_image_url" db:"selfie_image_url"`
+	VerificationStatus string     `json:"verification_status" db:"verification_status"`
+	VerificationNotes  *string    `json:"verification_notes" db:"verification_notes"`
+	VerifiedBy         *uuid.UUID `json:"verified_by" db:"verified_by"`
+	VerifiedAt         *time.Time `json:"verified_at" db:"verified_at"`
+	Metadata           Metadata   `json:"metadata" db:"metadata"`
+	CreatedAt          time.Time  `json:"created_at" db:"created_at"`
+	UpdatedAt          time.Time  `json:"updated_at" db:"updated_at"`
+}
+
+// APIKey represents an administrative API key
+type APIKey struct {
+	ID         uuid.UUID  `json:"id" db:"id"`
+	Name       string     `json:"name" db:"name"`
+	KeyPrefix  string     `json:"key_prefix" db:"key_prefix"`
+	KeyHash    string     `json:"-" db:"key_hash"`
+	Scopes     []string   `json:"scopes" db:"scopes"`
+	IsActive   bool       `json:"is_active" db:"is_active"`
+	ExpiresAt  *time.Time `json:"expires_at" db:"expires_at"`
+	CreatedBy  uuid.UUID  `json:"created_by" db:"created_by"`
+	LastUsedAt *time.Time `json:"last_used_at" db:"last_used_at"`
+	CreatedAt  time.Time  `json:"created_at" db:"created_at"`
+	RevokedAt  *time.Time `json:"revoked_at" db:"revoked_at"`
+}

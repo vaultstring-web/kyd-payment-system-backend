@@ -742,7 +742,7 @@ type KPIMetrics struct {
 }
 
 // CalculateKPIs computes key performance indicators.
-func (e *AnalyticsEngine) CalculateKPIs(ctx context.Context, period string) KPIMetrics {
+func (e *AnalyticsEngine) CalculateKPIs(ctx context.Context, startDate, endDate string) KPIMetrics {
 	// This would typically query the database
 	// For now, return calculated metrics based on in-memory data
 	
@@ -755,19 +755,50 @@ func (e *AnalyticsEngine) CalculateKPIs(ctx context.Context, period string) KPIM
 		return metrics
 	}
 
+	// Parse dates
+	var start, end time.Time
+	var err error
+	layout := "2006-01-02"
+
+	if startDate != "" {
+		start, err = time.Parse(layout, startDate)
+		if err != nil {
+			start = time.Time{}
+		}
+	}
+	if endDate != "" {
+		end, err = time.Parse(layout, endDate)
+		if err != nil {
+			end = time.Time{}
+		} else {
+			// Set to end of day
+			end = end.Add(24 * time.Hour).Add(-1 * time.Second)
+		}
+	}
+
 	// Calculate metrics from transaction data
 	var totalVolume float64
 	successCount := 0
 	fraudCount := 0
 	uniqueUsers := make(map[string]bool)
+	filteredCount := 0
 
 	for _, tx := range e.transactionData {
+		// Date filtering
+		if !start.IsZero() && tx.Timestamp.Before(start) {
+			continue
+		}
+		if !end.IsZero() && tx.Timestamp.After(end) {
+			continue
+		}
+
 		totalVolume += tx.Amount
 		uniqueUsers[tx.UserID] = true
+		filteredCount++
 	}
 
 	metrics.TotalVolume = decimal.NewFromFloat(totalVolume)
-	metrics.TransactionCount = len(e.transactionData)
+	metrics.TransactionCount = filteredCount
 	metrics.ActiveUsers = len(uniqueUsers)
 
 	if metrics.TransactionCount > 0 {

@@ -22,11 +22,11 @@ CREATE TABLE IF NOT EXISTS customer_schema.users (
     id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
     email VARCHAR(255) UNIQUE NOT NULL,
     email_hash VARCHAR(255), -- Blind Index for searchable encryption
-    phone VARCHAR(50) UNIQUE,
+    phone VARCHAR(255) UNIQUE,
     phone_hash VARCHAR(255), -- Blind Index for phone
     password_hash VARCHAR(255) NOT NULL,
-    first_name VARCHAR(100),
-    last_name VARCHAR(100),
+    first_name VARCHAR(255),
+    last_name VARCHAR(255),
     user_type VARCHAR(20) NOT NULL CHECK (user_type IN ('individual', 'merchant', 'agent', 'admin')),
     kyc_level SMALLINT DEFAULT 0,
     kyc_status VARCHAR(20) DEFAULT 'pending' CHECK (kyc_status IN ('pending', 'processing', 'verified', 'rejected')),
@@ -38,6 +38,7 @@ CREATE TABLE IF NOT EXISTS customer_schema.users (
     is_active BOOLEAN DEFAULT TRUE,
     email_verified BOOLEAN DEFAULT FALSE,
     totp_secret VARCHAR(255),
+    is_totp_enabled BOOLEAN DEFAULT FALSE,
     failed_login_attempts INTEGER DEFAULT 0,
     locked_until TIMESTAMPTZ,
     last_login TIMESTAMPTZ,
@@ -46,7 +47,7 @@ CREATE TABLE IF NOT EXISTS customer_schema.users (
 );
 
 CREATE INDEX idx_users_email ON customer_schema.users(email);
-CREATE INDEX idx_users_email_blind_index ON customer_schema.users(email_blind_index);
+CREATE INDEX idx_users_email_blind_index ON customer_schema.users(email_hash);
 CREATE INDEX idx_users_phone ON customer_schema.users(phone);
 CREATE INDEX idx_users_kyc_status ON customer_schema.users(kyc_status);
 CREATE INDEX idx_users_country ON customer_schema.users(country_code);
@@ -70,6 +71,22 @@ CREATE TABLE IF NOT EXISTS customer_schema.wallets (
 CREATE INDEX idx_wallets_user ON customer_schema.wallets(user_id);
 CREATE INDEX idx_wallets_currency ON customer_schema.wallets(currency);
 CREATE INDEX idx_wallets_status ON customer_schema.wallets(status);
+
+-- User Devices (Added from legacy 011)
+CREATE TABLE IF NOT EXISTS customer_schema.user_devices (
+    id UUID PRIMARY KEY DEFAULT uuid_generate_v4(),
+    user_id UUID NOT NULL REFERENCES customer_schema.users(id) ON DELETE CASCADE,
+    device_hash VARCHAR(255) NOT NULL,
+    device_name VARCHAR(255),
+    country_code VARCHAR(2),
+    ip_address VARCHAR(45),
+    is_trusted BOOLEAN DEFAULT TRUE,
+    last_seen_at TIMESTAMPTZ DEFAULT NOW(),
+    created_at TIMESTAMPTZ DEFAULT NOW(),
+    UNIQUE(user_id, device_hash)
+);
+
+CREATE INDEX idx_user_devices_user_id ON customer_schema.user_devices(user_id);
 
 -- Transactions
 CREATE TABLE IF NOT EXISTS customer_schema.transactions (

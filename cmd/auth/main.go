@@ -119,7 +119,7 @@ func main() {
 
 	// Initialize repositories
 	userRepo := postgres.NewUserRepository(db, cryptoService)
-	auditRepo := postgres.NewAuditRepository(db)
+	auditRepo := postgres.NewAuditRepository(db, cryptoService)
 
 	// Initialize token blacklist
 	blacklist := middleware.NewRedisTokenBlacklist(redisClient)
@@ -141,7 +141,7 @@ func main() {
 	val := validator.New()
 	// Cookie secure defaults to true; can be disabled in local/dev via COOKIE_SECURE=false or ENV=local
 	cookieSecure := envBool("COOKIE_SECURE", strings.ToLower(os.Getenv("ENV")) != "local")
-	authHandler := handler.NewAuthHandler(authService, val, log, cfg.TOTP.Issuer, cfg.TOTP.Period, cfg.TOTP.Digits, cookieSecure)
+	authHandler := handler.NewAuthHandler(authService, val, log, auditRepo, cfg.TOTP.Issuer, cfg.TOTP.Period, cfg.TOTP.Digits, cookieSecure)
 	usersHandler := handler.NewUsersHandler(authService, val, log)
 
 	// Setup router
@@ -177,6 +177,7 @@ func main() {
 	api.HandleFunc("/auth/me/password", usersHandler.ChangeMyPassword).Methods("POST")
 	api.HandleFunc("/auth/totp/setup", authHandler.SetupTOTP).Methods("POST")
 	api.HandleFunc("/auth/totp/verify", authHandler.VerifyTOTP).Methods("POST")
+	api.HandleFunc("/auth/totp/disable", authHandler.DisableTOTP).Methods("POST")
 	api.HandleFunc("/auth/totp/status", authHandler.TOTPStatus).Methods("GET")
 	// Admin user management
 	api.HandleFunc("/auth/users", usersHandler.List).Methods("GET")
