@@ -18,6 +18,7 @@ import (
 	"github.com/jmoiron/sqlx"
 	_ "github.com/lib/pq"
 	"github.com/redis/go-redis/v9"
+	"github.com/google/uuid"
 
 	"kyd/internal/handler"
 	"kyd/internal/middleware"
@@ -28,6 +29,18 @@ import (
 	"kyd/pkg/logger"
 	"kyd/pkg/validator"
 )
+
+type userStatusChecker struct {
+	repo *postgres.UserRepository
+}
+
+func (c *userStatusChecker) IsUserActive(ctx context.Context, id uuid.UUID) (bool, error) {
+	u, err := c.repo.FindByID(ctx, id)
+	if err != nil {
+		return false, err
+	}
+	return u.IsActive, nil
+}
 
 func main() {
 	cfg := config.Load()
@@ -104,7 +117,7 @@ func main() {
 	r.Use(middleware.NewRateLimiter(redisClient, 120, time.Minute).WithAdaptive(10, 30*time.Minute).Limit)
 
 	blacklist := middleware.NewRedisTokenBlacklist(redisClient)
-	authMW := middleware.NewAuthMiddleware(cfg.JWT.Secret, blacklist)
+	authMW := middleware.NewAuthMiddlewareWithUserStatus(cfg.JWT.Secret, blacklist, &userStatusChecker{repo: userRepo})
 
 	// Routes
 	r.HandleFunc("/health", healthCheck).Methods("GET")

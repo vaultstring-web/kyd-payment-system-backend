@@ -4,6 +4,7 @@ package handler
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"strings"
@@ -12,6 +13,7 @@ import (
 	"kyd/internal/auth"
 	"kyd/internal/domain"
 	"kyd/internal/middleware"
+	"kyd/internal/security"
 	"kyd/pkg/errors"
 	"kyd/pkg/logger"
 	"kyd/pkg/validator"
@@ -27,27 +29,29 @@ type AuditLogger interface {
 
 // AuthHandler handles authentication endpoints.
 type AuthHandler struct {
-	service      *auth.Service
-	validator    *validator.Validator
-	logger       logger.Logger
-	auditLogger  AuditLogger
-	totpIssuer   string
-	totpPeriod   int
-	totpDigits   int
-	cookieSecure bool
+	service         *auth.Service
+	validator       *validator.Validator
+	logger          logger.Logger
+	auditLogger     AuditLogger
+	securityService *security.Service
+	totpIssuer      string
+	totpPeriod      int
+	totpDigits      int
+	cookieSecure    bool
 }
 
 // NewAuthHandler creates a new AuthHandler.
-func NewAuthHandler(service *auth.Service, val *validator.Validator, log logger.Logger, auditLogger AuditLogger, totpIssuer string, totpPeriod int, totpDigits int, cookieSecure bool) *AuthHandler {
+func NewAuthHandler(service *auth.Service, val *validator.Validator, log logger.Logger, auditLogger AuditLogger, securityService *security.Service, totpIssuer string, totpPeriod int, totpDigits int, cookieSecure bool) *AuthHandler {
 	return &AuthHandler{
-		service:      service,
-		validator:    val,
-		logger:       log,
-		auditLogger:  auditLogger,
-		totpIssuer:   totpIssuer,
-		totpPeriod:   totpPeriod,
-		totpDigits:   totpDigits,
-		cookieSecure: cookieSecure,
+		service:         service,
+		validator:       val,
+		logger:          log,
+		auditLogger:     auditLogger,
+		securityService: securityService,
+		totpIssuer:      totpIssuer,
+		totpPeriod:      totpPeriod,
+		totpDigits:      totpDigits,
+		cookieSecure:    cookieSecure,
 	}
 }
 
@@ -150,40 +154,115 @@ func (h *AuthHandler) Login(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 
+	// Check blocklist by email before attempting login
+	if h.securityService != nil {
+		isBlocked, err := h.securityService.IsBlacklisted(r.Context(), req.Email)
+		if err != nil {
+			h.respondError(w, http.StatusServiceUnavailable, "Authentication service unavailable")
+			return
+		}
+		if isBlocked {
+			h.respondError(w, http.StatusForbidden, "Account is blocked")
+			return
+		}
+	}
+
 	response, err := h.service.Login(r.Context(), &req)
 	if err != nil {
+		ip := req.IPAddress
+		if ip == "" {
+			ip = r.Header.Get("X-Forwarded-For")
+			if ip == "" {
+				ip = r.RemoteAddr
+			}
+		}
+		ua := req.DeviceName
+		if ua == "" {
+			ua = r.UserAgent()
+		}
+
 		h.logger.Warn("Login failed", map[string]interface{}{
 			"event": "login_failed",
 			"email": req.Email,
 			"error": err.Error(),
-			"ip":    r.RemoteAddr,
-			"ua":    r.UserAgent(),
+			"ip":    ip,
+			"ua":    ua,
 		})
 
-		// Audit Log: Login Failed
 		_ = h.auditLogger.Create(r.Context(), &domain.AuditLog{
 			ID:           uuid.New(),
 			Action:       "LOGIN_FAILED",
 			EntityType:   "user",
 			EntityID:     req.Email, // Use email as identifier for failed attempts
 			UserEmail:    req.Email,
-			IPAddress:    req.IPAddress,
-			UserAgent:    req.DeviceName,
+			IPAddress:    ip,
+			UserAgent:    ua,
 			ErrorMessage: err.Error(),
 			CreatedAt:    time.Now(),
 		})
+
+		if h.securityService != nil {
+			go func(req auth.LoginRequest, ip, ua, errMsg string) {
+				riskScore := 50
+				if req.DeviceID == "" {
+					riskScore += 20
+				}
+				if req.CountryCode != "" {
+					riskScore += 10
+				}
+
+				severity := domain.SecuritySeverityMedium
+				if riskScore >= 80 {
+					severity = domain.SecuritySeverityHigh
+				}
+
+				description := fmt.Sprintf("Login failed for %s from %s (%s)", req.Email, ip, req.CountryCode)
+
+				_ = h.securityService.LogSecurityEvent(context.Background(), &domain.SecurityEvent{
+					Type:        domain.SecurityEventTypeAdminLoginFailed,
+					Severity:    severity,
+					Description: description,
+					UserID:      nil,
+					IPAddress:   ip,
+					Location:    req.CountryCode,
+					Status:      domain.SecurityEventStatusOpen,
+					Metadata: domain.Metadata{
+						"email":        req.Email,
+						"device_id":    req.DeviceID,
+						"device_name":  req.DeviceName,
+						"user_agent":   ua,
+						"risk_score":   riskScore,
+						"error":        errMsg,
+						"country_code": req.CountryCode,
+					},
+					CreatedAt: time.Now(),
+				})
+			}(req, ip, ua, err.Error())
+		}
 
 		h.respondError(w, http.StatusUnauthorized, "Invalid credentials")
 		return
 	}
 
+	ip := req.IPAddress
+	if ip == "" {
+		ip = r.Header.Get("X-Forwarded-For")
+		if ip == "" {
+			ip = r.RemoteAddr
+		}
+	}
+	ua := req.DeviceName
+	if ua == "" {
+		ua = r.UserAgent()
+	}
+
 	h.logger.Info("Login successful", map[string]interface{}{
 		"event":   "login_success",
 		"user_id": response.User.ID,
-		"ip":      r.RemoteAddr,
+		"ip":      ip,
+		"ua":      ua,
 	})
 
-	// Audit Log: Login Success
 	_ = h.auditLogger.Create(r.Context(), &domain.AuditLog{
 		ID:         uuid.New(),
 		Action:     "LOGIN_SUCCESS",
@@ -191,10 +270,53 @@ func (h *AuthHandler) Login(w http.ResponseWriter, r *http.Request) {
 		EntityType: "user",
 		EntityID:   response.User.ID.String(),
 		UserEmail:  response.User.Email,
-		IPAddress:  req.IPAddress,
-		UserAgent:  req.DeviceName,
+		IPAddress:  ip,
+		UserAgent:  ua,
 		CreatedAt:  time.Now(),
 	})
+
+	if h.securityService != nil && response.User != nil {
+		go func(user *domain.User, req auth.LoginRequest, ip, ua string) {
+			riskScore := 10
+			if req.CountryCode != "" && !strings.EqualFold(req.CountryCode, user.CountryCode) {
+				riskScore += 60
+			}
+			if req.DeviceID == "" {
+				riskScore += 20
+			}
+
+			if riskScore >= 60 {
+				severity := domain.SecuritySeverityMedium
+				if riskScore >= 80 {
+					severity = domain.SecuritySeverityHigh
+				}
+
+				description := fmt.Sprintf(
+					"Suspicious login for user %s from country %s (ip=%s, device=%s, risk=%d)",
+					user.Email, req.CountryCode, ip, req.DeviceName, riskScore,
+				)
+
+				_ = h.securityService.LogSecurityEvent(context.Background(), &domain.SecurityEvent{
+					Type:        domain.SecurityEventTypeSuspiciousIP,
+					Severity:    severity,
+					Description: description,
+					UserID:      &user.ID,
+					IPAddress:   ip,
+					Location:    req.CountryCode,
+					Status:      domain.SecurityEventStatusOpen,
+					Metadata: domain.Metadata{
+						"user_email":   user.Email,
+						"device_id":    req.DeviceID,
+						"device_name":  req.DeviceName,
+						"user_agent":   ua,
+						"risk_score":   riskScore,
+						"country_code": req.CountryCode,
+					},
+					CreatedAt: time.Now(),
+				})
+			}
+		}(response.User, req, ip, ua)
+	}
 
 	// Set httpOnly cookies for access and refresh tokens
 	h.setAuthCookies(w, response)
@@ -206,14 +328,28 @@ func (h *AuthHandler) Login(w http.ResponseWriter, r *http.Request) {
 func (h *AuthHandler) Me(w http.ResponseWriter, r *http.Request) {
 	userID, ok := middleware.UserIDFromContext(r.Context())
 	if !ok {
+		h.logger.Debug("Me: UserIDFromContext returned !ok - context missing user ID", map[string]interface{}{
+			"path":   r.URL.Path,
+			"method": r.Method,
+		})
 		h.respondError(w, http.StatusUnauthorized, "Unauthorized")
 		return
 	}
+	h.logger.Debug("Me: Successfully retrieved user ID from context", map[string]interface{}{
+		"user_id": userID.String(),
+	})
 	user, err := h.service.GetUserByID(r.Context(), userID)
 	if err != nil {
+		h.logger.Debug("Me: GetUserByID failed", map[string]interface{}{
+			"user_id": userID.String(),
+			"error":   err.Error(),
+		})
 		h.respondError(w, http.StatusNotFound, "User not found")
 		return
 	}
+	h.logger.Debug("Me: Successfully retrieved user", map[string]interface{}{
+		"user_id": user.ID.String(),
+	})
 	h.respondJSON(w, http.StatusOK, user)
 }
 

@@ -5,6 +5,7 @@ import (
 	"sync"
 	"time"
 
+	"kyd/internal/domain"
 	"kyd/pkg/config"
 
 	"github.com/google/uuid"
@@ -13,6 +14,15 @@ import (
 
 // RiskScore represents the calculated risk of a transaction (0-100)
 type RiskScore int
+
+type RiskStatus struct {
+	GlobalSystemPause      bool       `json:"global_system_pause"`
+	CircuitBreakerOpen     bool       `json:"circuit_breaker_open"`
+	FailureCount           int        `json:"failure_count"`
+	LastFailure            *time.Time `json:"last_failure,omitempty"`
+	Threshold              int        `json:"threshold"`
+	ResetDurationInSeconds int64      `json:"reset_duration_seconds"`
+}
 
 const (
 	RiskScoreLow      RiskScore = 0
@@ -39,13 +49,15 @@ type RiskEngine struct {
 	config       config.RiskConfig
 }
 
+var defaultEngine *RiskEngine
+
 func NewRiskEngine(cfg config.RiskConfig) *RiskEngine {
 	threshold := 10
 	if !cfg.EnableCircuitBreaker {
 		threshold = 1000000 // Effectively disabled
 	}
 
-	return &RiskEngine{
+	engine := &RiskEngine{
 		cb: &CircuitBreaker{
 			threshold:     threshold, // Max 10 consecutive failures
 			resetDuration: 1 * time.Minute,
@@ -53,12 +65,22 @@ func NewRiskEngine(cfg config.RiskConfig) *RiskEngine {
 		coolOffCache: make(map[string]time.Time),
 		config:       cfg,
 	}
+
+	defaultEngine = engine
+	return engine
+}
+
+func GetDefaultRiskEngine() *RiskEngine {
+	return defaultEngine
 }
 
 // CheckGlobalCircuitBreaker returns error if system is in safety mode
 func (re *RiskEngine) CheckGlobalCircuitBreaker() error {
-	// 1. Manual System Pause (Panic Button)
-	if re.config.GlobalSystemPause {
+	re.mu.RLock()
+	globalPause := re.config.GlobalSystemPause
+	re.mu.RUnlock()
+
+	if globalPause {
 		return fmt.Errorf("system is manually paused due to security alert")
 	}
 
@@ -138,7 +160,15 @@ func (re *RiskEngine) SetCoolOff(userID uuid.UUID, duration time.Duration) {
 
 // GetConfig returns the current risk configuration
 func (re *RiskEngine) GetConfig() config.RiskConfig {
+	re.mu.RLock()
+	defer re.mu.RUnlock()
 	return re.config
+}
+
+func (re *RiskEngine) CoolOffUserCount() int {
+	re.mu.RLock()
+	defer re.mu.RUnlock()
+	return len(re.coolOffCache)
 }
 
 // CheckVelocity verifies if the transaction frequency exceeds limits
@@ -177,7 +207,7 @@ func (re *RiskEngine) RequiresAdminApproval(amount decimal.Decimal) bool {
 }
 
 // EvaluateRisk calculates the risk score for a transaction
-func (re *RiskEngine) EvaluateRisk(amount decimal.Decimal, kycLevel int, isNewDevice bool, location string) RiskScore {
+func (re *RiskEngine) EvaluateRisk(amount decimal.Decimal, kycLevel int, isNewDevice bool, location string, accountAgeDays int) RiskScore {
 	score := RiskScoreLow
 
 	// Rule 1: High Amount vs KYC
@@ -197,7 +227,6 @@ func (re *RiskEngine) EvaluateRisk(amount decimal.Decimal, kycLevel int, isNewDe
 		score += 60
 	}
 
-	// Rule 3: Very High Value (Global Config)
 	if amount.GreaterThan(decimal.NewFromInt(re.config.HighValueThreshold)) {
 		score += 40
 	}
@@ -207,9 +236,154 @@ func (re *RiskEngine) EvaluateRisk(amount decimal.Decimal, kycLevel int, isNewDe
 		score += 50
 	}
 
+	if accountAgeDays >= 0 && accountAgeDays < 7 {
+		if amount.GreaterThan(decimal.NewFromInt(re.config.HighValueThreshold)) {
+			score += 40
+		}
+	}
+
 	if score > RiskScoreCritical {
 		score = RiskScoreCritical
 	}
 
 	return score
+}
+
+func (re *RiskEngine) GetStatus() RiskStatus {
+	re.mu.RLock()
+	globalPause := re.config.GlobalSystemPause
+	re.mu.RUnlock()
+
+	re.cb.mutex.RLock()
+	isOpen := re.cb.isOpen
+	failureCount := re.cb.failureCount
+	lastFailure := re.cb.lastFailure
+	threshold := re.cb.threshold
+	resetDuration := re.cb.resetDuration
+	re.cb.mutex.RUnlock()
+
+	var lastFailurePtr *time.Time
+	if !lastFailure.IsZero() {
+		t := lastFailure
+		lastFailurePtr = &t
+	}
+
+	return RiskStatus{
+		GlobalSystemPause:      globalPause,
+		CircuitBreakerOpen:     isOpen,
+		FailureCount:           failureCount,
+		LastFailure:            lastFailurePtr,
+		Threshold:              threshold,
+		ResetDurationInSeconds: int64(resetDuration.Seconds()),
+	}
+}
+
+func (re *RiskEngine) SetGlobalSystemPause(paused bool) {
+	re.mu.Lock()
+	defer re.mu.Unlock()
+	re.config.GlobalSystemPause = paused
+}
+
+func (re *RiskEngine) SetMaxDailyLimit(limit int64) {
+	if limit <= 0 {
+		return
+	}
+	re.mu.Lock()
+	defer re.mu.Unlock()
+	re.config.MaxDailyLimit = limit
+}
+
+func (re *RiskEngine) SetHighValueThreshold(threshold int64) {
+	if threshold <= 0 {
+		return
+	}
+	re.mu.Lock()
+	defer re.mu.Unlock()
+	re.config.HighValueThreshold = threshold
+}
+
+func (re *RiskEngine) SetMaxVelocityPerHour(limit int) {
+	if limit <= 0 {
+		return
+	}
+	re.mu.Lock()
+	defer re.mu.Unlock()
+	re.config.MaxVelocityPerHour = limit
+}
+
+func (re *RiskEngine) SetMaxVelocityPerDay(limit int) {
+	if limit <= 0 {
+		return
+	}
+	re.mu.Lock()
+	defer re.mu.Unlock()
+	re.config.MaxVelocityPerDay = limit
+}
+
+func (re *RiskEngine) SetSuspiciousLocationAlert(location string) {
+	re.mu.Lock()
+	defer re.mu.Unlock()
+	re.config.SuspiciousLocationAlert = location
+}
+
+func (re *RiskEngine) SetAdminApprovalThreshold(threshold int64) {
+	if threshold <= 0 {
+		return
+	}
+	re.mu.Lock()
+	defer re.mu.Unlock()
+	re.config.AdminApprovalThreshold = threshold
+}
+
+func (re *RiskEngine) SetRestrictedCountries(countries []string) {
+	re.mu.Lock()
+	defer re.mu.Unlock()
+	re.config.RestrictedCountries = countries
+}
+
+func (re *RiskEngine) SetEnableDisputeResolution(enabled bool) {
+	re.mu.Lock()
+	defer re.mu.Unlock()
+	re.config.EnableDisputeResolution = enabled
+}
+
+func (re *RiskEngine) OnBlockchainMismatch(event *domain.SecurityEvent) {
+	if event == nil {
+		return
+	}
+	if event.Type != domain.SecurityEventTypeBlockchainMismatch {
+		return
+	}
+
+	anomalyCount := 1
+	if event.Metadata != nil {
+		if v, ok := event.Metadata["anomaly_count"]; ok {
+			switch c := v.(type) {
+			case int:
+				if c > 0 {
+					anomalyCount = c
+				}
+			case int64:
+				if c > 0 {
+					anomalyCount = int(c)
+				}
+			case float64:
+				if c > 0 {
+					anomalyCount = int(c)
+				}
+			}
+		}
+	}
+
+	re.cb.mutex.RLock()
+	threshold := re.cb.threshold
+	re.cb.mutex.RUnlock()
+
+	totalFailures := 1 + anomalyCount
+	if anomalyCount >= 3 && threshold > 0 {
+		totalFailures = threshold
+	}
+	for i := 0; i < totalFailures; i++ {
+		re.ReportFailure()
+	}
 }

@@ -71,6 +71,11 @@ func (rl *RateLimiter) WithAdaptive(threshold int, duration time.Duration) *Rate
 // Limit enforces the rate limit, keyed by client IP and, when available, user ID.
 func (rl *RateLimiter) Limit(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if ut, ok := r.Context().Value(ctxUserTypeKey).(string); ok && ut == "admin" {
+			next.ServeHTTP(w, r)
+			return
+		}
+
 		ip := r.RemoteAddr
 		if host, _, err := net.SplitHostPort(r.RemoteAddr); err == nil {
 			ip = host

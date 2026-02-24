@@ -488,6 +488,22 @@ func (r *TransactionRepository) GetHourlyCount(ctx context.Context, userID uuid.
 	return count, nil
 }
 
+func (r *TransactionRepository) SumDailyVolume(ctx context.Context) (decimal.Decimal, error) {
+	var total decimal.Decimal
+	query := `
+        SELECT COALESCE(SUM(converted_amount), 0)
+        FROM customer_schema.transactions
+        WHERE created_at > NOW() - INTERVAL '24 hours'
+          AND status != 'failed'
+          AND status != 'cancelled'
+    `
+	err := r.db.GetContext(ctx, &total, query)
+	if err != nil {
+		return decimal.Zero, errors.Wrap(err, "failed to sum daily transaction volume")
+	}
+	return total, nil
+}
+
 func (r *TransactionRepository) SumVolume(ctx context.Context) (decimal.Decimal, error) {
 	var total decimal.Decimal
 	// Sum converted_amount for simplicity, or amount if currency matches base

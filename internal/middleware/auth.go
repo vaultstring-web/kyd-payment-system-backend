@@ -26,17 +26,28 @@ type TokenBlacklist interface {
 	IsBlacklisted(ctx context.Context, token string) (bool, error)
 }
 
+type UserStatusChecker interface {
+	IsUserActive(ctx context.Context, id uuid.UUID) (bool, error)
+}
+
 // AuthMiddleware validates bearer JWTs and injects user identity into the context.
 type AuthMiddleware struct {
-	jwtSecret string
-	blacklist TokenBlacklist
+	jwtSecret     string
+	jwtSecrets    []string
+	blacklist     TokenBlacklist
+	statusChecker UserStatusChecker
 }
 
 // NewAuthMiddleware constructs an AuthMiddleware with the given secret and optional blacklist.
 func NewAuthMiddleware(secret string, blacklist TokenBlacklist) *AuthMiddleware {
+	return NewAuthMiddlewareWithUserStatus(secret, blacklist, nil)
+}
+
+func NewAuthMiddlewareWithUserStatus(secret string, blacklist TokenBlacklist, statusChecker UserStatusChecker) *AuthMiddleware {
 	return &AuthMiddleware{
-		jwtSecret: secret,
-		blacklist: blacklist,
+		jwtSecret:     secret,
+		statusChecker: statusChecker,
+		blacklist:     blacklist,
 	}
 }
 
@@ -74,7 +85,13 @@ func (m *AuthMiddleware) Authenticate(next http.Handler) http.Handler {
 			if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
 				return nil, jwt.ErrSignatureInvalid
 			}
-			return []byte(m.jwtSecret), nil
+			if m.jwtSecret != "" {
+				return []byte(m.jwtSecret), nil
+			}
+			if len(m.jwtSecrets) > 0 {
+				return []byte(m.jwtSecrets[0]), nil
+			}
+			return nil, jwt.ErrSignatureInvalid
 		})
 
 		if err != nil || !token.Valid {
@@ -85,25 +102,48 @@ func (m *AuthMiddleware) Authenticate(next http.Handler) http.Handler {
 
 		claims, ok := token.Claims.(jwt.MapClaims)
 		if !ok {
+			fmt.Printf("AuthMiddleware: Failed to parse token claims\n")
 			respondJSONError(w, http.StatusUnauthorized, "Invalid token claims")
 			return
 		}
 
 		userIDStr, ok := claims["user_id"].(string)
 		if !ok {
+			fmt.Printf("AuthMiddleware: user_id claim missing or not string: %v\n", claims["user_id"])
 			respondJSONError(w, http.StatusUnauthorized, "Invalid user ID in token")
 			return
 		}
 
+		fmt.Printf("AuthMiddleware: Extracted user_id from token: %s\n", userIDStr)
+
 		userID, err := uuid.Parse(userIDStr)
 		if err != nil {
+			fmt.Printf("AuthMiddleware: Failed to parse user_id as UUID: %s, error: %v\n", userIDStr, err)
 			respondJSONError(w, http.StatusUnauthorized, "Invalid user ID format")
 			return
 		}
 
+		fmt.Printf("AuthMiddleware: Successfully parsed user ID: %s\n", userID.String())
+
+		if m.statusChecker != nil {
+			active, err := m.statusChecker.IsUserActive(r.Context(), userID)
+			if err != nil {
+				fmt.Printf("AuthMiddleware: Failed to check user status: %v\n", err)
+				respondJSONError(w, http.StatusInternalServerError, "Failed to verify account status")
+				return
+			}
+			if !active {
+				fmt.Printf("AuthMiddleware: User account is not active: %s\n", userID.String())
+				respondJSONError(w, http.StatusForbidden, "Account is blocked")
+				return
+			}
+		}
+
 		ctx := context.WithValue(r.Context(), ctxUserIDKey, userID)
+		fmt.Printf("AuthMiddleware: Injected user ID into context: %s\n", userID.String())
 		if email, ok := claims["email"].(string); ok {
 			ctx = context.WithValue(ctx, ctxEmailKey, email)
+			fmt.Printf("AuthMiddleware: Injected email into context: %s\n", email)
 		}
 		if utRaw, ok := claims["user_type"]; ok {
 			ctx = context.WithValue(ctx, ctxUserTypeKey, fmt.Sprintf("%v", utRaw))

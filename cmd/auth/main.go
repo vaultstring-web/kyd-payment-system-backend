@@ -17,6 +17,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/gorilla/mux"
 	"github.com/jmoiron/sqlx"
 	_ "github.com/lib/pq"
@@ -32,6 +33,18 @@ import (
 	"kyd/pkg/mailer"
 	"kyd/pkg/validator"
 )
+
+type userStatusChecker struct {
+	repo *postgres.UserRepository
+}
+
+func (c *userStatusChecker) IsUserActive(ctx context.Context, id uuid.UUID) (bool, error) {
+	u, err := c.repo.FindByID(ctx, id)
+	if err != nil {
+		return false, err
+	}
+	return u.IsActive, nil
+}
 
 func loadEnv() {
 	content, err := os.ReadFile(".env")
@@ -111,7 +124,7 @@ func main() {
 		log.Fatal("Failed to connect to Redis", map[string]interface{}{"error": err.Error()})
 	}
 
-	// Initialize security service
+	// Initialize security crypto service
 	cryptoService, err := security.NewCryptoService()
 	if err != nil {
 		log.Fatal("Failed to initialize crypto service", map[string]interface{}{"error": err.Error()})
@@ -120,12 +133,14 @@ func main() {
 	// Initialize repositories
 	userRepo := postgres.NewUserRepository(db, cryptoService)
 	auditRepo := postgres.NewAuditRepository(db, cryptoService)
+	securityRepo := postgres.NewSecurityRepository(db)
 
 	// Initialize token blacklist
 	blacklist := middleware.NewRedisTokenBlacklist(redisClient)
 
 	// Initialize services
-	authService := auth.NewService(userRepo, blacklist, cfg.JWT.Secret, cfg.JWT.Expiration)
+	authService := auth.NewService(userRepo, blacklist, cfg.JWT.Secret, cfg.JWT.Expiration).WithAdditionalJWTSecrets(cfg.JWT.OldSecrets)
+	securityService := security.NewService(securityRepo)
 	// Configure email verification
 	m := mailer.New(mailer.Config{
 		Host:     cfg.Email.SMTPHost,
@@ -139,10 +154,14 @@ func main() {
 
 	// Initialize handlers
 	val := validator.New()
-	// Cookie secure defaults to true; can be disabled in local/dev via COOKIE_SECURE=false or ENV=local
-	cookieSecure := envBool("COOKIE_SECURE", strings.ToLower(os.Getenv("ENV")) != "local")
-	authHandler := handler.NewAuthHandler(authService, val, log, auditRepo, cfg.TOTP.Issuer, cfg.TOTP.Period, cfg.TOTP.Digits, cookieSecure)
+	env := strings.ToLower(strings.TrimSpace(os.Getenv("ENV")))
+	if env == "" {
+		env = "local"
+	}
+	cookieSecure := envBool("COOKIE_SECURE", env != "local")
+	authHandler := handler.NewAuthHandler(authService, val, log, auditRepo, securityService, cfg.TOTP.Issuer, cfg.TOTP.Period, cfg.TOTP.Digits, cookieSecure)
 	usersHandler := handler.NewUsersHandler(authService, val, log)
+	enableRateLimiter := envBool("AUTH_RATE_LIMIT_ENABLED", env != "local")
 
 	// Setup router
 	r := mux.NewRouter()
@@ -151,7 +170,9 @@ func main() {
 	r.Use(middleware.CORS)
 	r.Use(middleware.CorrelationID)
 	r.Use(middleware.NewLoggingMiddleware(log).Log)
-	r.Use(middleware.NewRateLimiter(redisClient, 60, time.Minute).WithAdaptive(5, 15*time.Minute).Limit)
+	if enableRateLimiter {
+		r.Use(middleware.NewRateLimiter(redisClient, 60, time.Minute).WithAdaptive(5, 15*time.Minute).Limit)
+	}
 	r.Use(middleware.SecurityHeaders)
 	r.Use(middleware.Recovery)
 	r.Use(middleware.BodyLimit(1 << 20))
@@ -166,7 +187,7 @@ func main() {
 	r.HandleFunc("/api/v1/auth/debug", authHandler.DebugUser).Methods("GET")
 
 	// Protected routes
-	authMW := middleware.NewAuthMiddleware(cfg.JWT.Secret, blacklist)
+	authMW := middleware.NewAuthMiddlewareWithUserStatus(cfg.JWT.Secret, blacklist, &userStatusChecker{repo: userRepo})
 	auditMW := middleware.NewAuditMiddleware(auditRepo, log)
 
 	api := r.PathPrefix("/api/v1").Subrouter()

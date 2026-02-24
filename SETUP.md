@@ -64,7 +64,7 @@ If you must run services locally without Docker:
 
 3.  **Seed Data**:
     ```bash
-    go run cmd/seed/main.go
+    docker compose --profile tools run --rm seed-runner
     ```
 
 4.  **Run Services** (in separate terminals):

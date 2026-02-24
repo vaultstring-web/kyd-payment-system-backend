@@ -227,9 +227,78 @@ func NewShard(id int) *Shard {
 // AddBlock adds a block to the shard
 func (s *Shard) AddBlock(block *Block) bool {
 	hash := block.ComputeHash()
-	if _, exists := s.Blocks[hash]; !exists {
-		s.Blocks[hash] = block
-		return true
+	if _, exists := s.Blocks[hash]; exists {
+		return false
 	}
-	return false
+
+	if len(s.Blocks) > 0 && block.ParentHash != "0x0" {
+		if _, ok := s.Blocks[block.ParentHash]; !ok {
+			return false
+		}
+	}
+
+	s.Blocks[hash] = block
+	return true
+}
+
+func (s *Shard) ValidateChain() bool {
+	for storedHash, block := range s.Blocks {
+		computed := block.ComputeHash()
+		if computed != storedHash {
+			return false
+		}
+		if block.ParentHash != "0x0" {
+			if _, ok := s.Blocks[block.ParentHash]; !ok {
+				return false
+			}
+		}
+	}
+	return true
+}
+
+type ChainAnomaly struct {
+	ShardID             int
+	BlockNumber         uint64
+	StoredHash          string
+	ComputedHash        string
+	ParentHash          string
+	ParentExists        bool
+	TransactionCount    int
+	AnomalyClass        string
+	DeterministicVector string
+}
+
+func (s *Shard) DiagnoseChain() []ChainAnomaly {
+	anomalies := make([]ChainAnomaly, 0)
+	for storedHash, block := range s.Blocks {
+		computed := block.ComputeHash()
+		parentExists := true
+		if block.ParentHash != "0x0" {
+			_, ok := s.Blocks[block.ParentHash]
+			parentExists = ok
+		}
+		if computed == storedHash && parentExists {
+			continue
+		}
+		class := "hash_mismatch"
+		if computed == storedHash && !parentExists {
+			class = "parent_missing"
+		} else if computed != storedHash && !parentExists {
+			class = "hash_and_parent_mismatch"
+		}
+		vector := sha256.Sum256([]byte(storedHash + computed + block.ParentHash))
+		a := ChainAnomaly{
+			ShardID:             s.ShardID,
+			BlockNumber:         block.BlockNumber,
+			StoredHash:          storedHash,
+			ComputedHash:        computed,
+			ParentHash:          block.ParentHash,
+			ParentExists:        parentExists,
+			TransactionCount:    len(block.Transactions),
+			AnomalyClass:        class,
+			DeterministicVector: hex.EncodeToString(vector[:]),
+		}
+		anomalies = append(anomalies, a)
+	}
+	return anomalies
 }

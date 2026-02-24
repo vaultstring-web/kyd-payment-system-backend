@@ -9,6 +9,8 @@ package payment
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
 	"errors"
 	"fmt"
 	"time"
@@ -33,6 +35,20 @@ type TransactionDetail struct {
 	ReceiverName         string `json:"receiver_name,omitempty"`
 	SenderWalletNumber   string `json:"sender_wallet_number,omitempty"`
 	ReceiverWalletNumber string `json:"receiver_wallet_number,omitempty"`
+	BlockchainStatus     string `json:"blockchain_status,omitempty"`
+}
+
+type RiskUsageMetrics struct {
+	DailyVolume        decimal.Decimal `json:"daily_volume"`
+	MaxDailyLimit      int64           `json:"max_daily_limit"`
+	DailyUsageRatio    float64         `json:"daily_usage_ratio"`
+	MaxVelocityPerHour int             `json:"max_velocity_per_hour"`
+	MaxVelocityPerDay  int             `json:"max_velocity_per_day"`
+	GlobalSystemPause  bool            `json:"global_system_pause"`
+	CircuitBreakerOpen bool            `json:"circuit_breaker_open"`
+	FailureCount       int             `json:"failure_count"`
+	Threshold          int             `json:"threshold"`
+	CoolOffUsers       int             `json:"cool_off_users"`
 }
 
 type Service struct {
@@ -88,6 +104,56 @@ func NewService(
 		auditRepo:     auditRepo,
 		securityRepo:  securityRepo,
 	}
+}
+
+func (s *Service) logBlockchainMismatchAsync(tx *domain.Transaction) {
+	if s.securityRepo == nil || tx == nil {
+		return
+	}
+	if tx.Channel == "" {
+		return
+	}
+	channel := string(tx.Channel)
+	if channel != "ripple" && channel != "stellar" {
+		return
+	}
+	if tx.Status != domain.TransactionStatusCompleted {
+		return
+	}
+	if tx.BlockchainTxHash != "" {
+		return
+	}
+
+	go func(t domain.Transaction) {
+		ctx := context.Background()
+		payload := t.ID.String() + t.Reference + t.Channel + string(t.Status) + t.BlockchainTxHash
+		vector := sha256.Sum256([]byte(payload))
+		vectorHex := hex.EncodeToString(vector[:])
+		event := &domain.SecurityEvent{
+			Type:        domain.SecurityEventTypeBlockchainMismatch,
+			Severity:    domain.SecuritySeverityMedium,
+			Description: "Completed blockchain transaction without on-chain hash",
+			Status:      domain.SecurityEventStatusInvestigating,
+			UserID:      &t.SenderID,
+			IPAddress:   "",
+			Metadata: domain.Metadata{
+				"transaction_id":       t.ID.String(),
+				"reference":            t.Reference,
+				"channel":              t.Channel,
+				"status":               t.Status,
+				"amount":               t.Amount.String(),
+				"currency":             t.Currency,
+				"deterministic_vector": vectorHex,
+			},
+			CreatedAt: time.Now(),
+		}
+
+		if s.riskEngine != nil {
+			s.riskEngine.OnBlockchainMismatch(event)
+		}
+
+		_ = s.securityRepo.LogSecurityEvent(ctx, event)
+	}(*tx)
 }
 
 type InitiatePaymentRequest struct {
@@ -414,9 +480,11 @@ func (s *Service) InitiatePayment(ctx context.Context, req *InitiatePaymentReque
 		}
 	}
 
-	// Evaluate Risk Score
-	// We assume device is trusted here because of earlier check (lines 106-123)
-	riskScore := s.riskEngine.EvaluateRisk(req.Amount, sender.KYCLevel, false, req.Location)
+	accountAgeDays := int(time.Since(sender.CreatedAt).Hours() / 24)
+	if accountAgeDays < 0 {
+		accountAgeDays = 0
+	}
+	riskScore := s.riskEngine.EvaluateRisk(req.Amount, sender.KYCLevel, false, req.Location, accountAgeDays)
 	if riskScore >= risk.RiskScoreCritical {
 		s.logger.Error("Transaction blocked due to CRITICAL risk score", map[string]interface{}{
 			"risk_score": riskScore,
@@ -424,7 +492,6 @@ func (s *Service) InitiatePayment(ctx context.Context, req *InitiatePaymentReque
 			"sender_id":  req.SenderID,
 		})
 
-		// Notify user about risk block
 		go func() {
 			_ = s.notifier.Notify(context.Background(), req.SenderID, "RISK_ALERT", map[string]interface{}{
 				"reason": "Transaction blocked due to high risk score",
@@ -432,7 +499,6 @@ func (s *Service) InitiatePayment(ctx context.Context, req *InitiatePaymentReque
 			})
 		}()
 
-		// Log Security Event
 		go func() {
 			_ = s.securityRepo.LogSecurityEvent(context.Background(), &domain.SecurityEvent{
 				Type:        "risk_block",
@@ -444,6 +510,19 @@ func (s *Service) InitiatePayment(ctx context.Context, req *InitiatePaymentReque
 				CreatedAt:   time.Now(),
 			})
 		}()
+
+		if s.securityRepo != nil {
+			go func(userID uuid.UUID, amount decimal.Decimal, score risk.RiskScore) {
+				_ = s.securityRepo.AddToBlocklist(context.Background(), &domain.BlocklistEntry{
+					Type:      "user",
+					Value:     userID.String(),
+					Reason:    fmt.Sprintf("automatic block due to risk score %d on amount %s", score, amount.String()),
+					AddedBy:   uuid.Nil,
+					ExpiresAt: nil,
+					CreatedAt: time.Now(),
+				})
+			}(req.SenderID, req.Amount, riskScore)
+		}
 
 		return nil, errors.New("transaction blocked by risk engine")
 	}
@@ -622,6 +701,8 @@ func (s *Service) InitiatePayment(ctx context.Context, req *InitiatePaymentReque
 	}
 
 	s.riskEngine.ReportSuccess()
+
+	s.logBlockchainMismatchAsync(tx)
 
 	// 7. Mark as pending settlement (so Settlement Service picks it up)
 	tx.Status = domain.TransactionStatusPendingSettlement
@@ -882,6 +963,19 @@ func (s *Service) GetUserTransactions(ctx context.Context, userID uuid.UUID, wal
 				detail.ReceiverWalletNumber = *rWallet.WalletAddress
 			}
 		}
+		if tx.BlockchainTxHash != "" {
+			switch tx.Status {
+			case domain.TransactionStatusCompleted:
+				detail.BlockchainStatus = "confirmed"
+			case domain.TransactionStatusFailed,
+				domain.TransactionStatusReversed,
+				domain.TransactionStatusRefunded,
+				domain.TransactionStatusCancelled:
+				detail.BlockchainStatus = "failed"
+			default:
+				detail.BlockchainStatus = "pending"
+			}
+		}
 		details = append(details, detail)
 	}
 
@@ -921,6 +1015,19 @@ func (s *Service) GetAllTransactions(ctx context.Context, limit, offset int) ([]
 				detail.ReceiverWalletNumber = *rWallet.WalletAddress
 			}
 		}
+		if tx.BlockchainTxHash != "" {
+			switch tx.Status {
+			case domain.TransactionStatusCompleted:
+				detail.BlockchainStatus = "confirmed"
+			case domain.TransactionStatusFailed,
+				domain.TransactionStatusReversed,
+				domain.TransactionStatusRefunded,
+				domain.TransactionStatusCancelled:
+				detail.BlockchainStatus = "failed"
+			default:
+				detail.BlockchainStatus = "pending"
+			}
+		}
 		details = append(details, detail)
 	}
 
@@ -944,6 +1051,7 @@ type Repository interface {
 	CountByStatus(ctx context.Context, status domain.TransactionStatus) (int, error)
 	SumVolume(ctx context.Context) (decimal.Decimal, error)
 	SumEarnings(ctx context.Context) (decimal.Decimal, error)
+	SumDailyVolume(ctx context.Context) (decimal.Decimal, error)
 	CountAll(ctx context.Context) (int, error)
 	FindAll(ctx context.Context, limit, offset int) ([]*domain.Transaction, error)
 	FindFlagged(ctx context.Context, limit, offset int) ([]*domain.Transaction, error)
@@ -983,6 +1091,7 @@ type WalletRepository interface {
 type SecurityRepository interface {
 	LogSecurityEvent(ctx context.Context, event *domain.SecurityEvent) error
 	IsBlacklisted(ctx context.Context, value string) (bool, error)
+	AddToBlocklist(ctx context.Context, entry *domain.BlocklistEntry) error
 }
 
 type ForexService interface {
@@ -1196,6 +1305,33 @@ func (s *Service) GetSystemStats(ctx context.Context) (*domain.SystemStats, erro
 
 func (s *Service) GetTransactionVolume(ctx context.Context, months int) ([]*domain.TransactionVolume, error) {
 	return s.repo.GetTransactionVolume(ctx, months)
+}
+
+func (s *Service) GetRiskUsageMetrics(ctx context.Context) (*RiskUsageMetrics, error) {
+	dailyVolume, err := s.repo.SumDailyVolume(ctx)
+	if err != nil {
+		return nil, err
+	}
+	cfg := s.riskEngine.GetConfig()
+	status := s.riskEngine.GetStatus()
+	coolOffCount := s.riskEngine.CoolOffUserCount()
+	var ratio float64
+	if cfg.MaxDailyLimit > 0 {
+		v, _ := dailyVolume.Float64()
+		ratio = v / float64(cfg.MaxDailyLimit)
+	}
+	return &RiskUsageMetrics{
+		DailyVolume:        dailyVolume,
+		MaxDailyLimit:      cfg.MaxDailyLimit,
+		DailyUsageRatio:    ratio,
+		MaxVelocityPerHour: cfg.MaxVelocityPerHour,
+		MaxVelocityPerDay:  cfg.MaxVelocityPerDay,
+		GlobalSystemPause:  status.GlobalSystemPause,
+		CircuitBreakerOpen: status.CircuitBreakerOpen,
+		FailureCount:       status.FailureCount,
+		Threshold:          status.Threshold,
+		CoolOffUsers:       coolOffCount,
+	}, nil
 }
 
 func (s *Service) GetDisputes(ctx context.Context, limit, offset int) ([]*domain.Transaction, int, error) {

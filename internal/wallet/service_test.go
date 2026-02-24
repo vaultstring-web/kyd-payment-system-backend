@@ -62,6 +62,14 @@ func (m *MockRepository) FindByAddress(ctx context.Context, address string) (*do
 	return args.Get(0).(*domain.Wallet), args.Error(1)
 }
 
+func (m *MockRepository) SearchByAddress(ctx context.Context, partialAddress string, limit int) ([]*domain.Wallet, error) {
+	args := m.Called(ctx, partialAddress, limit)
+	if args.Get(0) == nil {
+		return nil, args.Error(1)
+	}
+	return args.Get(0).([]*domain.Wallet), args.Error(1)
+}
+
 func (m *MockRepository) DebitWallet(ctx context.Context, walletID uuid.UUID, amount decimal.Decimal) error {
 	args := m.Called(ctx, walletID, amount)
 	return args.Error(0)
@@ -87,6 +95,11 @@ func (m *MockRepository) FindAll(ctx context.Context, limit, offset int) ([]*dom
 
 type MockTransactionRepository struct {
 	mock.Mock
+}
+
+func (m *MockTransactionRepository) Create(ctx context.Context, tx *domain.Transaction) error {
+	args := m.Called(ctx, tx)
+	return args.Error(0)
 }
 
 func (m *MockTransactionRepository) FindByWalletID(ctx context.Context, walletID uuid.UUID, limit, offset int) ([]*domain.Transaction, error) {
@@ -154,8 +167,8 @@ func TestGetTransactionHistory(t *testing.T) {
 			ID:               uuid.New(),
 			SenderID:         senderID,
 			ReceiverID:       receiverID,
-			SenderWalletID:   senderWalletID,
-			ReceiverWalletID: receiverWalletID,
+			SenderWalletID:   &senderWalletID,
+			ReceiverWalletID: &receiverWalletID,
 			Amount:           decimal.NewFromInt(100),
 			Currency:         domain.MWK,
 			CreatedAt:        time.Now(),

@@ -20,9 +20,10 @@ type Money struct {
 type Currency string
 
 const (
-	MWK Currency = "MWK" // Malawi Kwacha
-	CNY Currency = "CNY" // Chinese Yuan
-	ZMW Currency = "ZMW" // Zambian Kwacha
+	MWK Currency = "MWK"
+	CNY Currency = "CNY"
+	ZMW Currency = "ZMW"
+	USD Currency = "USD"
 
 	// Africa
 	ZAR Currency = "ZAR" // South African Rand
@@ -390,10 +391,11 @@ type SystemStats struct {
 }
 
 const (
-	SecurityEventTypeBruteForce       = "brute_force"
-	SecurityEventTypeSuspiciousIP     = "suspicious_ip"
-	SecurityEventTypeAdminLoginFailed = "admin_login_failed"
-	SecurityEventTypeVelocityLimit    = "velocity_limit"
+	SecurityEventTypeBruteForce         = "brute_force"
+	SecurityEventTypeSuspiciousIP       = "suspicious_ip"
+	SecurityEventTypeAdminLoginFailed   = "admin_login_failed"
+	SecurityEventTypeVelocityLimit      = "velocity_limit"
+	SecurityEventTypeBlockchainMismatch = "blockchain_mismatch"
 
 	SecuritySeverityCritical = "critical"
 	SecuritySeverityHigh     = "high"

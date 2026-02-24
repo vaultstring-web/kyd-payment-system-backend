@@ -33,7 +33,7 @@ The database starts empty (or with only schema). To populate it with test users 
 
 **Run the Seeder:**
 ```powershell
-./scripts/seed.ps1
+docker compose --profile tools run --rm seed-runner
 ```
 *Note: This runs a container that connects to the database and inserts sample data.*
 

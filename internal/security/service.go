@@ -2,8 +2,10 @@ package security
 
 import (
 	"context"
+	"time"
 
 	"kyd/internal/domain"
+
 	"github.com/google/uuid"
 )
 
@@ -13,6 +15,7 @@ type Repository interface {
 	GetBlocklist(ctx context.Context) ([]domain.BlocklistEntry, error)
 	AddToBlocklist(ctx context.Context, entry *domain.BlocklistEntry) error
 	RemoveFromBlocklist(ctx context.Context, id uuid.UUID) error
+	IsBlacklisted(ctx context.Context, value string) (bool, error)
 	GetSystemHealth(ctx context.Context) ([]domain.SystemHealthMetric, error)
 	RecordHealthSnapshot(ctx context.Context, metric *domain.SystemHealthMetric) error
 	UpdateSecurityEventStatus(ctx context.Context, id uuid.UUID, status string, resolvedBy *uuid.UUID) error
@@ -46,6 +49,10 @@ func (s *Service) RemoveFromBlocklist(ctx context.Context, id uuid.UUID) error {
 	return s.repo.RemoveFromBlocklist(ctx, id)
 }
 
+func (s *Service) IsBlacklisted(ctx context.Context, value string) (bool, error) {
+	return s.repo.IsBlacklisted(ctx, value)
+}
+
 func (s *Service) GetSystemHealth(ctx context.Context) ([]domain.SystemHealthMetric, error) {
 	return s.repo.GetSystemHealth(ctx)
 }
@@ -56,4 +63,22 @@ func (s *Service) RecordHealthSnapshot(ctx context.Context, metric *domain.Syste
 
 func (s *Service) UpdateSecurityEventStatus(ctx context.Context, id uuid.UUID, status string, resolvedBy *uuid.UUID) error {
 	return s.repo.UpdateSecurityEventStatus(ctx, id, status, resolvedBy)
+}
+
+func (s *Service) NewBlockchainMismatchEvent(network string, shardID int, height uint64, vector string, anomalies int, metadata domain.Metadata) *domain.SecurityEvent {
+	return &domain.SecurityEvent{
+		Type:        domain.SecurityEventTypeBlockchainMismatch,
+		Severity:    domain.SecuritySeverityHigh,
+		Description: "blockchain_mismatch",
+		Status:      domain.SecurityEventStatusOpen,
+		Metadata: domain.Metadata{
+			"network":              network,
+			"shard_id":             shardID,
+			"height":               height,
+			"anomaly_count":        anomalies,
+			"deterministic_vector": vector,
+			"extra":                metadata,
+		},
+		CreatedAt: time.Now(),
+	}
 }

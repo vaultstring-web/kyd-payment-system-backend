@@ -7,6 +7,7 @@ import (
 
 	"kyd/internal/domain"
 	"kyd/internal/middleware"
+	"kyd/internal/risk"
 	"kyd/internal/security"
 	"kyd/pkg/validator"
 
@@ -165,4 +166,99 @@ func (h *SecurityHandler) GetSystemHealth(w http.ResponseWriter, r *http.Request
 	}
 
 	respondJSON(w, http.StatusOK, metrics)
+}
+
+func (h *SecurityHandler) GetRiskConfig(w http.ResponseWriter, r *http.Request) {
+	ut, ok := middleware.UserTypeFromContext(r.Context())
+	if !ok || ut != string(domain.UserTypeAdmin) {
+		respondError(w, http.StatusForbidden, "Forbidden")
+		return
+	}
+
+	engine := risk.GetDefaultRiskEngine()
+	if engine == nil {
+		respondError(w, http.StatusServiceUnavailable, "Risk engine not initialized")
+		return
+	}
+
+	cfg := engine.GetConfig()
+	respondJSON(w, http.StatusOK, cfg)
+}
+
+func (h *SecurityHandler) GetRiskStatus(w http.ResponseWriter, r *http.Request) {
+	ut, ok := middleware.UserTypeFromContext(r.Context())
+	if !ok || ut != string(domain.UserTypeAdmin) {
+		respondError(w, http.StatusForbidden, "Forbidden")
+		return
+	}
+
+	engine := risk.GetDefaultRiskEngine()
+	if engine == nil {
+		respondError(w, http.StatusServiceUnavailable, "Risk engine not initialized")
+		return
+	}
+
+	status := engine.GetStatus()
+	respondJSON(w, http.StatusOK, status)
+}
+
+func (h *SecurityHandler) UpdateRiskConfig(w http.ResponseWriter, r *http.Request) {
+	ut, ok := middleware.UserTypeFromContext(r.Context())
+	if !ok || ut != string(domain.UserTypeAdmin) {
+		respondError(w, http.StatusForbidden, "Forbidden")
+		return
+	}
+
+	engine := risk.GetDefaultRiskEngine()
+	if engine == nil {
+		respondError(w, http.StatusServiceUnavailable, "Risk engine not initialized")
+		return
+	}
+
+	var req struct {
+		GlobalSystemPause       *bool    `json:"global_system_pause,omitempty"`
+		MaxDailyLimit           *int64   `json:"max_daily_limit,omitempty"`
+		HighValueThreshold      *int64   `json:"high_value_threshold,omitempty"`
+		MaxVelocityPerHour      *int     `json:"max_velocity_per_hour,omitempty"`
+		MaxVelocityPerDay       *int     `json:"max_velocity_per_day,omitempty"`
+		SuspiciousLocationAlert *string  `json:"suspicious_location_alert,omitempty"`
+		AdminApprovalThreshold  *int64   `json:"admin_approval_threshold,omitempty"`
+		RestrictedCountries     []string `json:"restricted_countries,omitempty"`
+		EnableDisputeResolution *bool    `json:"enable_dispute_resolution,omitempty"`
+	}
+
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		respondError(w, http.StatusBadRequest, "Invalid request body")
+		return
+	}
+
+	if req.GlobalSystemPause != nil {
+		engine.SetGlobalSystemPause(*req.GlobalSystemPause)
+	}
+	if req.MaxDailyLimit != nil {
+		engine.SetMaxDailyLimit(*req.MaxDailyLimit)
+	}
+	if req.HighValueThreshold != nil {
+		engine.SetHighValueThreshold(*req.HighValueThreshold)
+	}
+	if req.MaxVelocityPerHour != nil {
+		engine.SetMaxVelocityPerHour(*req.MaxVelocityPerHour)
+	}
+	if req.MaxVelocityPerDay != nil {
+		engine.SetMaxVelocityPerDay(*req.MaxVelocityPerDay)
+	}
+	if req.SuspiciousLocationAlert != nil {
+		engine.SetSuspiciousLocationAlert(*req.SuspiciousLocationAlert)
+	}
+	if req.AdminApprovalThreshold != nil {
+		engine.SetAdminApprovalThreshold(*req.AdminApprovalThreshold)
+	}
+	if req.RestrictedCountries != nil {
+		engine.SetRestrictedCountries(req.RestrictedCountries)
+	}
+	if req.EnableDisputeResolution != nil {
+		engine.SetEnableDisputeResolution(*req.EnableDisputeResolution)
+	}
+
+	respondJSON(w, http.StatusOK, engine.GetStatus())
 }

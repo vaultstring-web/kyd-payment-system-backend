@@ -1,4 +1,3 @@
-
 # ==============================================================================
 # Docker Compose - docker-compose.yml
 
@@ -53,6 +52,7 @@ services:
       HMAC_KEY: ${HMAC_KEY}
       SERVER_PORT: 8080
       ENV: local
+      AUTH_RATE_LIMIT_ENABLED: "false"
     ports:
       - "3000:8080"
     depends_on:
@@ -61,6 +61,12 @@ services:
       redis:
         condition: service_healthy
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:8080/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
 
   payment-service:
     build:
@@ -92,6 +98,12 @@ services:
       redis:
         condition: service_healthy
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:8080/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
 
   forex-service:
     build:
@@ -119,6 +131,12 @@ services:
       redis:
         condition: service_healthy
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:8080/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
 
   wallet-service:
     build:
@@ -144,6 +162,12 @@ services:
       redis:
         condition: service_healthy
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:8080/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
 
   settlement-service:
     build:
@@ -168,6 +192,12 @@ services:
       redis:
         condition: service_healthy
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:8080/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
 
   gateway-service:
     build:
@@ -184,6 +214,7 @@ services:
       JWT_SECRET: sk_4f9b8c1e7a23d94f0b6de1a28cd94f71d9f3b0c28c6fa47e9b12df67c8e41a25
       SERVER_PORT: 8080
       ENV: local
+      GATEWAY_RATE_LIMIT_ENABLED: "false"
       ALLOWED_ORIGINS: >-
         http://localhost:3012,
         http://localhost:3016,
@@ -212,8 +243,22 @@ services:
       redis:
         condition: service_healthy
       auth-service:
-        condition: service_started
+        condition: service_healthy
+      payment-service:
+        condition: service_healthy
+      forex-service:
+        condition: service_healthy
+      wallet-service:
+        condition: service_healthy
+      settlement-service:
+        condition: service_healthy
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:8080/health"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
 
   seed-runner:
     image: golang:1.24.11-alpine
@@ -252,7 +297,8 @@ services:
     ports:
       - "3016:3016"
     depends_on:
-      - gateway-service
+      gateway-service:
+        condition: service_healthy
     restart: unless-stopped
 
   web-frontend:
@@ -267,13 +313,10 @@ services:
     ports:
       - "3012:3012"
     depends_on:
-      - gateway-service
+      gateway-service:
+        condition: service_healthy
     restart: unless-stopped
 
 volumes:
   postgres_data:
   redis_data:
-
-networks:
-  default:
-    name: kyd-network

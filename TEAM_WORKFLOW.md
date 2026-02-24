@@ -41,7 +41,7 @@ docker-compose logs -f postgres
 ### 4. Run Seed Data
 Populate the fresh database with test users (Admin, Merchant, Individuals):
 ```bash
-go run cmd/seed/main.go
+docker compose --profile tools run --rm seed-runner
 ```
 
 ## 🛡️ Security Development Workflow

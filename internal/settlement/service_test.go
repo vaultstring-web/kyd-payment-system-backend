@@ -148,7 +148,7 @@ func TestRecoverPendingSettlements(t *testing.T) {
 	settlementID := uuid.New()
 	settlement := &domain.Settlement{
 		ID:              settlementID,
-		TransactionHash: &txHash,
+		TransactionHash: txHash,
 		Network:         domain.NetworkRipple,
 		Status:          domain.SettlementStatusSubmitted,
 	}

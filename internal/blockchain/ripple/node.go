@@ -187,6 +187,9 @@ func (n *BlockchainNode) AddBlock(block *Block) bool {
 	if !n.verifyBlock(block) {
 		return false
 	}
+	if !n.applyBlockState(block) {
+		return false
+	}
 	n.Blocks[hash] = block
 	n.HeadBlock = block
 
@@ -212,9 +215,85 @@ func (n *BlockchainNode) AddBlock(block *Block) bool {
 	return true
 }
 
+func (n *BlockchainNode) applyBlockState(block *Block) bool {
+	snapshot := make(map[string]*AccountState, len(n.Accounts))
+	for addr, st := range n.Accounts {
+		copyState := *st
+		snapshot[addr] = &copyState
+	}
+
+	for _, tx := range block.Transactions {
+		if tx == nil {
+			continue
+		}
+
+		if tx.Amount <= 0 || tx.Sender == nil || tx.Receiver == nil {
+			continue
+		}
+
+		senderAddr := n.Crypto.DeriveAddress(tx.Sender.KeyMaterial)
+		receiverAddr := n.Crypto.DeriveAddress(tx.Receiver.KeyMaterial)
+
+		senderState, ok := n.Accounts[senderAddr]
+		if !ok {
+			senderState = &AccountState{}
+			n.Accounts[senderAddr] = senderState
+		}
+		if senderState.Balance < tx.Amount {
+			n.Accounts = snapshot
+			return false
+		}
+
+		expectedNonce := senderState.Nonce + 1
+		if tx.Nonce != expectedNonce {
+			n.Accounts = snapshot
+			return false
+		}
+
+		receiverState, ok := n.Accounts[receiverAddr]
+		if !ok {
+			receiverState = &AccountState{}
+			n.Accounts[receiverAddr] = receiverState
+		}
+
+		senderState.Balance -= tx.Amount
+		senderState.Nonce++
+		receiverState.Balance += tx.Amount
+	}
+
+	return true
+}
+
 func (n *BlockchainNode) verifyBlock(block *Block) bool {
 	if block.ParentHash != "0x0" {
 		if _, ok := n.Blocks[block.ParentHash]; !ok && n.GenesisHash != block.ParentHash {
+			return false
+		}
+	}
+
+	if block.Signature != nil && block.Proposer != nil {
+		switch block.Signature.Algorithm {
+		case AlgoEd25519:
+			if !n.Crypto.VerifyEd25519([]byte(block.ComputeHash()), block.Signature.SignatureData, block.Proposer.KeyMaterial) {
+				return false
+			}
+		case AlgoDilithium:
+			if !n.Crypto.VerifyDilithium([]byte(block.ComputeHash()), block.Signature.SignatureData, block.Proposer.KeyMaterial) {
+				return false
+			}
+		}
+	}
+
+	if n.Consensus != nil && block.Proposer != nil {
+		proposerHex := block.Proposer.ToHex()
+		found := false
+		for _, v := range n.Consensus.ActiveValidators {
+			if v.PublicKey != nil && v.PublicKey.ToHex() == proposerHex {
+				found = true
+				break
+			}
+		}
+		if !found {
 			return false
 		}
 	}
@@ -236,6 +315,29 @@ func (n *BlockchainNode) verifyBlock(block *Block) bool {
 func (n *BlockchainNode) verifyTransaction(tx *Transaction) bool {
 	if tx == nil {
 		return false
+	}
+
+	if tx.TxID != tx.ComputeHash() {
+		return false
+	}
+
+	if tx.Amount > 0 {
+		if tx.Signature == nil || tx.Sender == nil {
+			return false
+		}
+	}
+
+	if tx.Signature != nil && tx.Sender != nil {
+		switch tx.Signature.Algorithm {
+		case AlgoEd25519:
+			if !n.Crypto.VerifyEd25519([]byte(tx.ComputeHash()), tx.Signature.SignatureData, tx.Sender.KeyMaterial) {
+				return false
+			}
+		case AlgoDilithium:
+			if !n.Crypto.VerifyDilithium([]byte(tx.ComputeHash()), tx.Signature.SignatureData, tx.Sender.KeyMaterial) {
+				return false
+			}
+		}
 	}
 
 	// Banking Compliance & Smart Contract Verification

@@ -53,12 +53,19 @@ func (c *Connector) SubmitSettlement(_ context.Context, s *domain.Settlement) (*
 	shard.PendingTransactions = append(shard.PendingTransactions, tx)
 
 	// Simulate immediate block creation for settlement confirmation
+	proposerID := ""
+	if len(c.Simulator.Validators) > 0 {
+		proposerID = c.Simulator.Validators[0].ValidatorID
+	} else {
+		proposerID = "val_0"
+	}
+
 	mb := &MicroBlock{
 		BlockID:      fmt.Sprintf("mb_%d_%d", shardID, time.Now().UnixNano()),
 		Transactions: []*ConfidentialTransaction{tx},
 		Timestamp:    float64(time.Now().Unix()),
 		Weight:       1.0,
-		ProposerID:   "validator_1", // Simplified
+		ProposerID:   proposerID,
 	}
 
 	// Validate Block using Consensus Engine (Smart Contracts & Compliance)

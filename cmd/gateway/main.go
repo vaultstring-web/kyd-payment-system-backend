@@ -81,8 +81,31 @@ func getEnv(key, fallback string) string {
 	return fallback
 }
 
+func envBool(key string, def bool) bool {
+	val := os.Getenv(key)
+	if val == "" {
+		return def
+	}
+	switch strings.ToLower(strings.TrimSpace(val)) {
+	case "1", "true", "yes", "y", "on":
+		return true
+	case "0", "false", "no", "n", "off":
+		return false
+	default:
+		return def
+	}
+}
+
 func NewGateway(log logger.Logger, redisClient *redis.Client, cfg *config.Config) *Gateway {
-	rl := middleware.NewRateLimiter(redisClient, 100, time.Minute).WithAdaptive(10, 30*time.Minute)
+	env := strings.ToLower(strings.TrimSpace(os.Getenv("ENV")))
+	if env == "" {
+		env = "local"
+	}
+	enableRateLimiter := envBool("GATEWAY_RATE_LIMIT_ENABLED", env != "local")
+	var rl *middleware.RateLimiter
+	if enableRateLimiter {
+		rl = middleware.NewRateLimiter(redisClient, 100, time.Minute).WithAdaptive(10, 30*time.Minute)
+	}
 
 	var tlsConfig *tls.Config
 	if cfg.Server.UseTLS {
@@ -373,8 +396,11 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 	})
 
-	// Execute Rate Limiter
-	g.rateLimiter.Limit(next).ServeHTTP(w, r)
+	if g.rateLimiter != nil {
+		g.rateLimiter.Limit(next).ServeHTTP(w, r)
+		return
+	}
+	next.ServeHTTP(w, r)
 }
 func requiresGatewaySigning(path string) bool {
 	if matchPath(path, "/api/v1/payments") {

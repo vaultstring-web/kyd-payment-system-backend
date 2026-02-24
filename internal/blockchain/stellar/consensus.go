@@ -464,6 +464,12 @@ type AegisNetSimulator struct {
 	MEVSystem        *MEVDemocratization
 	ProtocolTreasury float64
 	ValidatorRewards map[string]float64
+	Epochs           []*Epoch
+	Stats            *AegisNetStats
+}
+
+type AegisNetStats struct {
+	TotalEpochs int
 }
 
 // NewAegisNetSimulator creates a new simulator
@@ -499,4 +505,99 @@ func NewAegisNetSimulator(numShards, numValidators, committeeSize int) *AegisNet
 	sim.MEVSystem = NewMEVDemocratization(sim)
 
 	return sim
+}
+
+// StartNewEpoch starts a new epoch and initializes its committee
+func (s *AegisNetSimulator) StartNewEpoch() *Epoch {
+	epochNumber := uint64(len(s.Epochs) + 1)
+	epoch := &Epoch{
+		EpochNumber:      epochNumber,
+		ShardCommitments: make(map[int]string),
+		StartTime:        float64(time.Now().Unix()),
+	}
+
+	seed := fmt.Sprintf("epoch_seed_%d", epochNumber)
+	epoch.Committee = s.Consensus.SelectCommitteeWithCaps(seed, s.CommitteeSize)
+
+	s.Epochs = append(s.Epochs, epoch)
+	return epoch
+}
+
+// GenerateConfidentialTransaction creates a sample confidential transaction for simulations
+func (s *AegisNetSimulator) GenerateConfidentialTransaction(shardID int, transparent bool) *ConfidentialTransaction {
+	tx := &ConfidentialTransaction{
+		TxID:              fmt.Sprintf("tx_%d_%d", shardID, time.Now().UnixNano()),
+		SenderZKAddress:   fmt.Sprintf("sender_shard_%d", shardID),
+		ReceiverZKAddress: fmt.Sprintf("receiver_shard_%d", shardID),
+		Amount:            100,
+		AssetType:         "USD",
+		Timestamp:         float64(time.Now().Unix()),
+		Transparent:       transparent,
+	}
+	return tx
+}
+
+// ProposeMicroBlockWithMEV builds and validates a microblock using pending shard transactions
+func (s *AegisNetSimulator) ProposeMicroBlockWithMEV(shardID int, proposerID string) *MicroBlock {
+	shard, ok := s.Shards[shardID]
+	if !ok {
+		return nil
+	}
+
+	if len(shard.PendingTransactions) == 0 {
+		return nil
+	}
+
+	blockID := fmt.Sprintf("mb_shard_%d_%d", shardID, len(shard.MicroBlocks)+1)
+	mb := &MicroBlock{
+		BlockID:      blockID,
+		ShardID:      shardID,
+		ProposerID:   proposerID,
+		Transactions: shard.PendingTransactions,
+		Weight:       float64(len(shard.PendingTransactions)),
+	}
+
+	// Clear pending txs for this simple simulation once included
+	shard.PendingTransactions = nil
+
+	// Validate block using consensus rules
+	if !s.Consensus.ValidateBlock(mb) {
+		return nil
+	}
+
+	// Run MEV auction for this block/slot
+	s.MEVSystem.RunSequencerAuction(shardID, len(shard.MicroBlocks)+1)
+
+	// Store block in shard state
+	shard.MicroBlocks[blockID] = mb
+	return mb
+}
+
+// FinalizeEpochWithCrossShardProof finalizes the current epoch and updates stats
+func (s *AegisNetSimulator) FinalizeEpochWithCrossShardProof() {
+	if len(s.Epochs) == 0 {
+		return
+	}
+
+	epoch := s.Epochs[len(s.Epochs)-1]
+
+	if epoch.ShardCommitments == nil {
+		epoch.ShardCommitments = make(map[int]string)
+	}
+
+	for shardID, shard := range s.Shards {
+		epoch.ShardCommitments[shardID] = shard.StateRoot
+	}
+
+	epoch.PQCheckpoint = &QuantumSafeCheckpoint{
+		EpochNumber:     epoch.EpochNumber,
+		GlobalStateRoot: epoch.ComputeGlobalStateRoot(),
+		Timestamp:       float64(time.Now().Unix()),
+	}
+	epoch.Finalized = true
+
+	if s.Stats == nil {
+		s.Stats = &AegisNetStats{}
+	}
+	s.Stats.TotalEpochs++
 }

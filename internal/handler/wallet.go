@@ -275,6 +275,38 @@ func (h *WalletHandler) GetTransactionHistory(w http.ResponseWriter, r *http.Req
 	})
 }
 
+func (h *WalletHandler) GetTransactionHistoryAdmin(w http.ResponseWriter, r *http.Request) {
+	ut, _ := middleware.UserTypeFromContext(r.Context())
+	if ut != "admin" {
+		h.respondError(w, http.StatusForbidden, "admin access required")
+		return
+	}
+
+	vars := mux.Vars(r)
+	walletID, err := uuid.Parse(vars["id"])
+	if err != nil {
+		h.respondError(w, http.StatusBadRequest, "Invalid wallet ID")
+		return
+	}
+
+	limit, offset := parsePagination(r)
+
+	txs, total, err := h.service.GetTransactionHistoryAdmin(r.Context(), walletID, limit, offset)
+	if err != nil {
+		h.respondError(w, http.StatusInternalServerError, "Failed to fetch wallet transactions")
+		return
+	}
+
+	h.respondJSON(w, http.StatusOK, map[string]interface{}{
+		"wallet_id":    walletID,
+		"transactions": txs,
+		"total":        total,
+		"limit":        limit,
+		"offset":       offset,
+		"count":        len(txs),
+	})
+}
+
 func (h *WalletHandler) respondJSON(w http.ResponseWriter, status int, data interface{}) {
 	w.Header().Set("Content-Type", "application/json")
 	w.WriteHeader(status)

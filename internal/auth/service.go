@@ -41,6 +41,7 @@ type Service struct {
 	repo                Repository
 	blacklist           TokenBlacklist
 	jwtSecret           string
+	jwtSecrets          []string
 	jwtExpiry           time.Duration
 	mailer              *mailer.Mailer
 	verificationBaseURL string
@@ -49,12 +50,37 @@ type Service struct {
 
 // NewService constructs a Service with the given repository and JWT settings.
 func NewService(repo Repository, blacklist TokenBlacklist, jwtSecret string, jwtExpiry time.Duration) *Service {
-	return &Service{
+	s := &Service{
 		repo:      repo,
 		blacklist: blacklist,
 		jwtSecret: jwtSecret,
 		jwtExpiry: jwtExpiry,
 	}
+	if jwtSecret != "" {
+		s.jwtSecrets = []string{jwtSecret}
+	}
+	return s
+}
+
+func (s *Service) WithAdditionalJWTSecrets(secrets []string) *Service {
+	seen := make(map[string]struct{})
+	all := make([]string, 0, len(secrets)+1)
+	if s.jwtSecret != "" {
+		seen[s.jwtSecret] = struct{}{}
+		all = append(all, s.jwtSecret)
+	}
+	for _, sec := range secrets {
+		if sec == "" {
+			continue
+		}
+		if _, ok := seen[sec]; ok {
+			continue
+		}
+		seen[sec] = struct{}{}
+		all = append(all, sec)
+	}
+	s.jwtSecrets = all
+	return s
 }
 
 // WithEmailVerification configures mailer and verification options.
@@ -160,6 +186,10 @@ func (s *Service) Login(ctx context.Context, req *LoginRequest) (*TokenResponse,
 		return nil, kyderrors.ErrInvalidCredentials
 	}
 
+	if !user.IsActive {
+		return nil, kyderrors.ErrInvalidCredentials
+	}
+
 	// Verify password
 	if err := bcrypt.CompareHashAndPassword([]byte(user.PasswordHash), []byte(req.Password)); err != nil {
 		return nil, kyderrors.ErrInvalidCredentials
@@ -205,7 +235,13 @@ func (s *Service) Login(ctx context.Context, req *LoginRequest) (*TokenResponse,
 func (s *Service) Logout(ctx context.Context, tokenString string) error {
 	// Parse token to get expiration
 	token, err := jwt.Parse(tokenString, func(token *jwt.Token) (interface{}, error) {
-		return []byte(s.jwtSecret), nil
+		if s.jwtSecret != "" {
+			return []byte(s.jwtSecret), nil
+		}
+		if len(s.jwtSecrets) > 0 {
+			return []byte(s.jwtSecrets[0]), nil
+		}
+		return nil, jwt.ErrSignatureInvalid
 	})
 
 	if err != nil {
@@ -246,7 +282,11 @@ func (s *Service) generateTokens(user *domain.User) (*TokenResponse, error) {
 	}
 
 	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
-	accessToken, err := token.SignedString([]byte(s.jwtSecret))
+	signingSecret := s.jwtSecret
+	if signingSecret == "" && len(s.jwtSecrets) > 0 {
+		signingSecret = s.jwtSecrets[0]
+	}
+	accessToken, err := token.SignedString([]byte(signingSecret))
 	if err != nil {
 		return nil, fmt.Errorf("failed to sign token: %w", err)
 	}
@@ -329,7 +369,11 @@ func (s *Service) sendVerificationEmail(user *domain.User) error {
 		"iat":     time.Now().Unix(),
 	}
 	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
-	signed, err := token.SignedString([]byte(s.jwtSecret))
+	signingSecret := s.jwtSecret
+	if signingSecret == "" && len(s.jwtSecrets) > 0 {
+		signingSecret = s.jwtSecrets[0]
+	}
+	signed, err := token.SignedString([]byte(signingSecret))
 	if err != nil {
 		return err
 	}
@@ -358,7 +402,13 @@ func (s *Service) VerifyEmail(ctx context.Context, tokenString string) error {
 		if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
 			return nil, jwt.ErrSignatureInvalid
 		}
-		return []byte(s.jwtSecret), nil
+		if s.jwtSecret != "" {
+			return []byte(s.jwtSecret), nil
+		}
+		if len(s.jwtSecrets) > 0 {
+			return []byte(s.jwtSecrets[0]), nil
+		}
+		return nil, jwt.ErrSignatureInvalid
 	})
 	if err != nil || !token.Valid {
 		return kyderrors.ErrInvalidCredentials

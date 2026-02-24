@@ -26,16 +26,16 @@ type Config struct {
 }
 
 type RiskConfig struct {
-	EnableCircuitBreaker    bool
-	MaxDailyLimit           int64
-	HighValueThreshold      int64
-	MaxVelocityPerHour      int
-	MaxVelocityPerDay       int
-	SuspiciousLocationAlert string
-	GlobalSystemPause       bool
-	AdminApprovalThreshold  int64
-	RestrictedCountries     []string
-	EnableDisputeResolution bool
+	EnableCircuitBreaker    bool     `json:"enable_circuit_breaker"`
+	MaxDailyLimit           int64    `json:"max_daily_limit"`
+	HighValueThreshold      int64    `json:"high_value_threshold"`
+	MaxVelocityPerHour      int      `json:"max_velocity_per_hour"`
+	MaxVelocityPerDay       int      `json:"max_velocity_per_day"`
+	SuspiciousLocationAlert string   `json:"suspicious_location_alert"`
+	GlobalSystemPause       bool     `json:"global_system_pause"`
+	AdminApprovalThreshold  int64    `json:"admin_approval_threshold"`
+	RestrictedCountries     []string `json:"restricted_countries"`
+	EnableDisputeResolution bool     `json:"enable_dispute_resolution"`
 }
 
 type ComplianceConfig struct {
@@ -71,6 +71,7 @@ type RedisConfig struct {
 
 type JWTConfig struct {
 	Secret     string
+	OldSecrets []string
 	Expiration time.Duration
 }
 
@@ -154,6 +155,7 @@ func Load() *Config {
 		},
 		JWT: JWTConfig{
 			Secret:     getEnv("JWT_SECRET", "change-this-secret"),
+			OldSecrets: getStringSliceEnv("JWT_OLD_SECRETS", ""),
 			Expiration: getDurationEnv("JWT_EXPIRATION", 15*time.Minute),
 		},
 		TOTP: TOTPConfig{
@@ -269,4 +271,3 @@ func getStringSliceEnv(key string, defaultValue string) []string {
 	}
 	return parts
 }
-																														

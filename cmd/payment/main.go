@@ -73,6 +73,21 @@ func loadEnv() {
 	}
 }
 
+type userStatusChecker struct {
+	repo *postgres.UserRepository
+}
+
+func (c *userStatusChecker) IsUserActive(ctx context.Context, id uuid.UUID) (bool, error) {
+	u, err := c.repo.FindByID(ctx, id)
+	if err != nil {
+		return false, err
+	}
+	if u.UserType == domain.UserTypeAdmin {
+		return true, nil
+	}
+	return u.IsActive, nil
+}
+
 func main() {
 	loadEnv()
 	cfg := config.Load()
@@ -250,7 +265,7 @@ func main() {
 	r.Use(middleware.NewRateLimiter(redisClient, 150, time.Minute).WithAdaptive(10, 30*time.Minute).Limit)
 
 	blacklist := middleware.NewRedisTokenBlacklist(redisClient)
-	authMW := middleware.NewAuthMiddleware(cfg.JWT.Secret, blacklist)
+	authMW := middleware.NewAuthMiddlewareWithUserStatus(cfg.JWT.Secret, blacklist, &userStatusChecker{repo: userRepo})
 	idemMW := middleware.NewIdempotencyMiddleware(redisClient, 24*time.Hour)
 	auditMW := middleware.NewAuditMiddleware(auditRepo, log)
 
@@ -316,6 +331,7 @@ func main() {
 	admin.HandleFunc("/analytics/earnings", analyticsHandler.GetEarningsReport).Methods("GET")
 	admin.HandleFunc("/analytics/volume", paymentHandler.GetTransactionVolume).Methods("GET")
 	admin.HandleFunc("/risk/alerts", paymentHandler.GetRiskAlerts).Methods("GET")
+	admin.HandleFunc("/risk/metrics", paymentHandler.GetRiskUsageMetrics).Methods("GET")
 	admin.HandleFunc("/audit-logs", systemHandler.GetAuditLogs).Methods("GET")
 	admin.HandleFunc("/disputes", paymentHandler.GetDisputes).Methods("GET")
 	admin.HandleFunc("/disputes/resolve", paymentHandler.ResolveDispute).Methods("POST")
@@ -387,8 +403,12 @@ func main() {
 	admin.HandleFunc("/security/blocklist", securityHandler.AddToBlocklist).Methods("POST")
 	admin.HandleFunc("/security/blocklist/{id}", securityHandler.RemoveFromBlocklist).Methods("DELETE")
 	admin.HandleFunc("/security/health", securityHandler.GetSystemHealth).Methods("GET")
+	admin.HandleFunc("/security/risk/config", securityHandler.GetRiskConfig).Methods("GET")
+	admin.HandleFunc("/security/risk/status", securityHandler.GetRiskStatus).Methods("GET")
+	admin.HandleFunc("/security/risk/config", securityHandler.UpdateRiskConfig).Methods("PATCH")
 
 	admin.HandleFunc("/wallets", walletHandler.GetAllWallets).Methods("GET")
+	admin.HandleFunc("/wallets/{id}/transactions", walletHandler.GetTransactionHistoryAdmin).Methods("GET")
 	admin.HandleFunc("/users", func(w http.ResponseWriter, r *http.Request) {
 		ut, _ := middleware.UserTypeFromContext(r.Context())
 		if ut != "admin" {
@@ -646,21 +666,40 @@ func main() {
 		total, _ := txRepo.CountAll(r.Context())
 
 		type BlockchainTransaction struct {
-			TxID        uuid.UUID `json:"tx_id"`
-			BlockNumber int       `json:"block_number,omitempty"`
-			Status      string    `json:"status"`
-			Timestamp   time.Time `json:"timestamp"`
-			Channel     string    `json:"channel,omitempty"`
-			Chaincode   string    `json:"chaincode,omitempty"`
+			TxID             uuid.UUID `json:"tx_id"`
+			BlockNumber      int       `json:"block_number,omitempty"`
+			Status           string    `json:"status"`
+			Timestamp        time.Time `json:"timestamp"`
+			Channel          string    `json:"channel,omitempty"`
+			Chaincode        string    `json:"chaincode,omitempty"`
+			BlockchainTxHash string    `json:"blockchain_tx_hash,omitempty"`
+			BlockchainStatus string    `json:"blockchain_status"`
 		}
 
 		bTxs := make([]BlockchainTransaction, len(txs))
 		for i, tx := range txs {
+			bcStatus := "none"
+			if tx.BlockchainTxHash != "" {
+				switch tx.Status {
+				case domain.TransactionStatusCompleted:
+					bcStatus = "confirmed"
+				case domain.TransactionStatusFailed,
+					domain.TransactionStatusReversed,
+					domain.TransactionStatusRefunded,
+					domain.TransactionStatusCancelled:
+					bcStatus = "failed"
+				default:
+					bcStatus = "pending"
+				}
+			}
+
 			bTxs[i] = BlockchainTransaction{
-				TxID:      tx.ID,
-				Status:    string(tx.Status),
-				Timestamp: tx.CreatedAt,
-				Channel:   "kyd-channel",
+				TxID:             tx.ID,
+				Status:           string(tx.Status),
+				Timestamp:        tx.CreatedAt,
+				Channel:          "kyd-channel",
+				BlockchainTxHash: tx.BlockchainTxHash,
+				BlockchainStatus: bcStatus,
 			}
 			if tx.BlockchainTxHash != "" {
 				// Mock block number for display
@@ -834,13 +873,25 @@ func main() {
 			return
 		}
 
+		role := strings.ToLower(strings.TrimSpace(req.UserType))
+		switch role {
+		case string(domain.UserTypeIndividual),
+			string(domain.UserTypeMerchant),
+			string(domain.UserTypeAgent),
+			string(domain.UserTypeAdmin):
+		default:
+			w.WriteHeader(http.StatusBadRequest)
+			w.Write([]byte(`{"error":"invalid user_type"}`))
+			return
+		}
+
 		user, err := userRepo.FindByID(r.Context(), id)
 		if err != nil {
 			w.WriteHeader(http.StatusNotFound)
 			return
 		}
 
-		user.UserType = domain.UserType(req.UserType)
+		user.UserType = domain.UserType(role)
 		if err := userRepo.Update(r.Context(), user); err != nil {
 			w.WriteHeader(http.StatusInternalServerError)
 			return
@@ -951,7 +1002,6 @@ func main() {
 		w.Write([]byte(`{"message":"profile updated"}`))
 	}).Methods("PATCH")
 
-	// User Activity
 	admin.HandleFunc("/users/{id}/activity", func(w http.ResponseWriter, r *http.Request) {
 		ut, _ := middleware.UserTypeFromContext(r.Context())
 		if ut != "admin" {
@@ -986,35 +1036,8 @@ func main() {
 			return
 		}
 
-		// Format logs for UI
-		type ActivityLog struct {
-			ID        uuid.UUID `json:"id"`
-			Action    string    `json:"action"`
-			Timestamp time.Time `json:"timestamp"`
-			Details   string    `json:"details,omitempty"`
-		}
-
-		uiLogs := make([]ActivityLog, len(logs))
-		for i, l := range logs {
-			details := ""
-			if l.NewValues != nil {
-				var meta map[string]interface{}
-				if err := json.Unmarshal(l.NewValues, &meta); err == nil {
-					if reason, ok := meta["reason"].(string); ok {
-						details = reason
-					}
-				}
-			}
-			uiLogs[i] = ActivityLog{
-				ID:        l.ID,
-				Action:    l.Action,
-				Timestamp: l.CreatedAt,
-				Details:   details,
-			}
-		}
-
 		w.Header().Set("Content-Type", "application/json")
-		json.NewEncoder(w).Encode(map[string]interface{}{"logs": uiLogs, "total": len(uiLogs)}) // Total logic requires CountByUserID if needed
+		json.NewEncoder(w).Encode(map[string]interface{}{"logs": logs, "total": len(logs)})
 	}).Methods("GET")
 
 	// User Profile Update
@@ -1296,12 +1319,19 @@ func main() {
 			return
 		}
 
+		if !req.IsActive && strings.TrimSpace(req.Reason) == "" {
+			w.WriteHeader(http.StatusBadRequest)
+			w.Write([]byte(`{"error":"reason is required when blocking a user"}`))
+			return
+		}
+
 		u, err := userRepo.FindByID(r.Context(), id)
 		if err != nil {
 			w.WriteHeader(http.StatusNotFound)
 			return
 		}
 
+		prevActive := u.IsActive
 		u.IsActive = req.IsActive
 		u.UpdatedAt = time.Now()
 
@@ -1311,20 +1341,53 @@ func main() {
 			return
 		}
 
-		// Audit log
 		action := "DEACTIVATE_USER"
 		if req.IsActive {
 			action = "ACTIVATE_USER"
 		}
 		entityType := "user"
+
+		auditMeta := domain.Metadata{
+			"reason":     req.Reason,
+			"is_active":  req.IsActive,
+			"prev_state": prevActive,
+		}
+
 		auditRepo.Create(r.Context(), &domain.AuditLog{
 			ID:         uuid.New(),
 			UserID:     &id,
 			Action:     action,
 			EntityType: entityType,
 			EntityID:   id.String(),
+			Metadata:   auditMeta,
 			CreatedAt:  time.Now(),
 		})
+
+		if !req.IsActive {
+			adminID, ok := middleware.UserIDFromContext(r.Context())
+			if ok {
+				entry := &domain.BlocklistEntry{
+					Type:      "email",
+					Value:     u.Email,
+					Reason:    req.Reason,
+					AddedBy:   adminID,
+					ExpiresAt: nil,
+					CreatedAt: time.Now(),
+				}
+				_ = securityService.AddToBlocklist(r.Context(), entry)
+
+				secEvent := &domain.SecurityEvent{
+					Type:        "manual_user_block",
+					Severity:    "high",
+					Description: req.Reason,
+					UserID:      &id,
+					IPAddress:   r.RemoteAddr,
+					Status:      "open",
+					CreatedAt:   time.Now(),
+				}
+				_ = securityService.LogSecurityEvent(r.Context(), secEvent)
+			}
+		}
 
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
@@ -1354,12 +1417,46 @@ func main() {
 			return
 		}
 
+		type auditLogResponse struct {
+			ID           uuid.UUID       `json:"id"`
+			Action       string          `json:"action"`
+			UserEmail    string          `json:"user_email"`
+			CreatedAt    time.Time       `json:"created_at"`
+			IPAddress    string          `json:"ip_address,omitempty"`
+			UserAgent    string          `json:"user_agent,omitempty"`
+			ErrorMessage string          `json:"error_message,omitempty"`
+			NewValues    json.RawMessage `json:"new_values,omitempty"`
+			RequestID    string          `json:"request_id,omitempty"`
+			Reason       string          `json:"reason,omitempty"`
+		}
+
+		responseLogs := make([]auditLogResponse, 0, len(logs))
+		for _, l := range logs {
+			reason := ""
+			if l.Metadata != nil {
+				if v, ok := l.Metadata["reason"]; ok {
+					if s, ok := v.(string); ok {
+						reason = s
+					}
+				}
+			}
+			responseLogs = append(responseLogs, auditLogResponse{
+				ID:           l.ID,
+				Action:       l.Action,
+				UserEmail:    l.UserEmail,
+				CreatedAt:    l.CreatedAt,
+				IPAddress:    l.IPAddress,
+				UserAgent:    l.UserAgent,
+				ErrorMessage: l.ErrorMessage,
+				NewValues:    l.NewValues,
+				RequestID:    l.RequestID,
+				Reason:       reason,
+			})
+		}
+
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
-		type Resp struct {
-			Logs []*domain.AuditLog `json:"logs"`
-		}
-		json.NewEncoder(w).Encode(Resp{Logs: logs})
+		json.NewEncoder(w).Encode(map[string]interface{}{"logs": responseLogs})
 	}).Methods("GET")
 
 	// Get All Audit Logs
@@ -1952,6 +2049,38 @@ func main() {
 	admin.HandleFunc("/security/blocklist/{id}", securityHandler.RemoveFromBlocklist).Methods("DELETE")
 	admin.HandleFunc("/security/health", securityHandler.GetSystemHealth).Methods("GET")
 
+	// Notifications endpoints
+	admin.HandleFunc("/notifications", func(w http.ResponseWriter, r *http.Request) {
+		ut, _ := middleware.UserTypeFromContext(r.Context())
+		if ut != "admin" {
+			w.WriteHeader(http.StatusForbidden)
+			w.Write([]byte(`{"error":"admin access required"}`))
+			return
+		}
+
+		limit := 50
+		offset := 0
+		if v := r.URL.Query().Get("limit"); v != "" {
+			if n, err := strconv.Atoi(v); err == nil && n > 0 {
+				limit = n
+			}
+		}
+		if v := r.URL.Query().Get("offset"); v != "" {
+			if n, err := strconv.Atoi(v); err == nil && n >= 0 {
+				offset = n
+			}
+		}
+		response := map[string]interface{}{
+			"notifications": []interface{}{},
+			"total":         0,
+			"limit":         limit,
+			"offset":        offset,
+		}
+
+		w.Header().Set("Content-Type", "application/json")
+		json.NewEncoder(w).Encode(response)
+	}).Methods("GET")
+
 	admin.HandleFunc("/blockchain/wallets", func(w http.ResponseWriter, r *http.Request) {
 		ut, _ := middleware.UserTypeFromContext(r.Context())
 		if ut != "admin" {
@@ -1978,6 +2107,9 @@ func main() {
 			Currency      domain.Currency     `json:"currency"`
 			Status        domain.WalletStatus `json:"status"`
 			CreatedAt     time.Time           `json:"created_at"`
+			Address       string              `json:"address"`
+			Network       string              `json:"network"`
+			Balance       float64             `json:"balance"`
 		}
 
 		var wallets []*domain.Wallet
@@ -2010,6 +2142,10 @@ func main() {
 
 		addresses := make([]WalletAddr, len(wallets))
 		for i, w := range wallets {
+			addrStr := ""
+			if w.WalletAddress != nil {
+				addrStr = *w.WalletAddress
+			}
 			addresses[i] = WalletAddr{
 				ID:            w.ID,
 				UserID:        w.UserID,
@@ -2017,6 +2153,9 @@ func main() {
 				Currency:      w.Currency,
 				Status:        w.Status,
 				CreatedAt:     w.CreatedAt,
+				Address:       addrStr,
+				Network:       "local-ledger",
+				Balance:       w.LedgerBalance.InexactFloat64(),
 			}
 		}
 

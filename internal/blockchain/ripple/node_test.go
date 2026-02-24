@@ -11,9 +11,22 @@ func TestBlockchainNode_AddBlock_TxIndex(t *testing.T) {
 	// Initialize genesis block
 	node.CreateGenesisBlock(nil)
 
-	sender := NewPublicKey(AlgoEd25519, []byte("sender_key_material_32_bytes_long"))
-	receiver := NewPublicKey(AlgoEd25519, []byte("receiver_key_material_32_bytes_long"))
+	cs := &CryptoSystem{}
+	pubSender, privSender, err := cs.GenerateEd25519Keypair()
+	if err != nil {
+		t.Fatalf("failed to generate sender keypair: %v", err)
+	}
+	pubReceiver, _, err := cs.GenerateEd25519Keypair()
+	if err != nil {
+		t.Fatalf("failed to generate receiver keypair: %v", err)
+	}
+
+	sender := NewPublicKey(AlgoEd25519, pubSender)
+	receiver := NewPublicKey(AlgoEd25519, pubReceiver)
 	tx := NewTransaction(sender, receiver, 100, 1)
+
+	sig := cs.SignEd25519([]byte(tx.ComputeHash()), privSender)
+	tx.Signature = NewSignature(AlgoEd25519, sig, sender)
 
 	// Add transaction to mempool
 	added := node.AddTransaction(tx)
@@ -25,6 +38,13 @@ func TestBlockchainNode_AddBlock_TxIndex(t *testing.T) {
 		PublicKey:   NewPublicKey(AlgoEd25519, []byte("validator_key_material_32_bytes")),
 		Stake:       1000,
 	}
+
+	node.Consensus.RegisterValidator(validator)
+
+	senderAddr := node.Crypto.DeriveAddress(sender.KeyMaterial)
+	receiverAddr := node.Crypto.DeriveAddress(receiver.KeyMaterial)
+	node.Accounts[senderAddr] = &AccountState{Balance: 1000, Nonce: 0}
+	node.Accounts[receiverAddr] = &AccountState{Balance: 0, Nonce: 0}
 
 	// Create a new block
 	// Note: NewBlockchainNode initializes Genesis block as HeadBlock

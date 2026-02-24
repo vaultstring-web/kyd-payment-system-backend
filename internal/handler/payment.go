@@ -277,6 +277,23 @@ func (h *PaymentHandler) GetTransactionVolume(w http.ResponseWriter, r *http.Req
 	h.respondJSON(w, http.StatusOK, volumes)
 }
 
+func (h *PaymentHandler) GetRiskUsageMetrics(w http.ResponseWriter, r *http.Request) {
+	ut, ok := middleware.UserTypeFromContext(r.Context())
+	if !ok || ut != string(domain.UserTypeAdmin) {
+		h.respondError(w, http.StatusForbidden, "Forbidden")
+		return
+	}
+
+	metrics, err := h.service.GetRiskUsageMetrics(r.Context())
+	if err != nil {
+		h.logger.Error("Failed to fetch risk usage metrics", map[string]interface{}{"error": err.Error()})
+		h.respondError(w, http.StatusInternalServerError, "Failed to fetch risk usage metrics")
+		return
+	}
+
+	h.respondJSON(w, http.StatusOK, metrics)
+}
+
 // GetSystemStats returns system-wide statistics (for admin).
 func (h *PaymentHandler) GetSystemStats(w http.ResponseWriter, r *http.Request) {
 	// 1. Authorization Check (Admin only)

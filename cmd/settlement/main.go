@@ -14,6 +14,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/gorilla/mux"
 	"github.com/jmoiron/sqlx"
 	_ "github.com/lib/pq"
@@ -23,10 +24,23 @@ import (
 	"kyd/internal/blockchain/stellar"
 	"kyd/internal/middleware"
 	"kyd/internal/repository/postgres"
+	"kyd/internal/security"
 	"kyd/internal/settlement"
 	"kyd/pkg/config"
 	"kyd/pkg/logger"
 )
+
+type userStatusChecker struct {
+	repo *postgres.UserRepository
+}
+
+func (c *userStatusChecker) IsUserActive(ctx context.Context, id uuid.UUID) (bool, error) {
+	u, err := c.repo.FindByID(ctx, id)
+	if err != nil {
+		return false, err
+	}
+	return u.IsActive, nil
+}
 
 func main() {
 	cfg := config.Load()
@@ -87,9 +101,18 @@ func main() {
 
 	log.Info("Blockchain connectors initialized", nil)
 
+	// Initialize security service
+	cryptoService, err := security.NewCryptoService()
+	if err != nil {
+		log.Fatal("Failed to initialize crypto service", map[string]interface{}{
+			"error": err.Error(),
+		})
+	}
+
 	// Initialize repositories
 	settlementRepo := postgres.NewSettlementRepository(db)
 	txRepo := postgres.NewTransactionRepository(db)
+	userRepo := postgres.NewUserRepository(db, cryptoService)
 
 	// Initialize settlement service
 	settlementService := settlement.NewService(
@@ -114,7 +137,7 @@ func main() {
 
 	// Auth Middleware
 	blacklist := middleware.NewRedisTokenBlacklist(redisClient)
-	authMW := middleware.NewAuthMiddleware(cfg.JWT.Secret, blacklist)
+	authMW := middleware.NewAuthMiddlewareWithUserStatus(cfg.JWT.Secret, blacklist, &userStatusChecker{repo: userRepo})
 
 	// Routes
 	r.HandleFunc("/health", healthCheck).Methods("GET")

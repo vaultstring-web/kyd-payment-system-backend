@@ -73,6 +73,7 @@ const (
 	MWK = pkg.MWK
 	CNY = pkg.CNY
 	ZMW = pkg.ZMW
+	USD = pkg.USD
 
 	// Africa
 	ZAR = pkg.ZAR
@@ -172,10 +173,11 @@ const (
 
 // Re-exported security constants
 const (
-	SecurityEventTypeBruteForce       = pkg.SecurityEventTypeBruteForce
-	SecurityEventTypeSuspiciousIP     = pkg.SecurityEventTypeSuspiciousIP
-	SecurityEventTypeAdminLoginFailed = pkg.SecurityEventTypeAdminLoginFailed
-	SecurityEventTypeVelocityLimit    = pkg.SecurityEventTypeVelocityLimit
+	SecurityEventTypeBruteForce         = pkg.SecurityEventTypeBruteForce
+	SecurityEventTypeSuspiciousIP       = pkg.SecurityEventTypeSuspiciousIP
+	SecurityEventTypeAdminLoginFailed   = pkg.SecurityEventTypeAdminLoginFailed
+	SecurityEventTypeVelocityLimit      = pkg.SecurityEventTypeVelocityLimit
+	SecurityEventTypeBlockchainMismatch = pkg.SecurityEventTypeBlockchainMismatch
 
 	SecuritySeverityCritical = pkg.SecuritySeverityCritical
 	SecuritySeverityHigh     = pkg.SecuritySeverityHigh

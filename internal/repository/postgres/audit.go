@@ -87,8 +87,12 @@ func (r *AuditRepository) FindByUserID(ctx context.Context, userID uuid.UUID, li
 			COALESCE(a.request_id, '') AS request_id, a.status_code, COALESCE(a.error_message, '') AS error_message, a.created_at,
             COALESCE(u.email, '') AS user_email
 		FROM admin_schema.audit_logs a
-        LEFT JOIN customer_schema.users u ON a.user_id = u.id
-		WHERE a.user_id = $1 OR (a.entity_type = 'user' AND a.entity_id = $2)
+        LEFT JOIN customer_schema.users u 
+            ON a.user_id = u.id 
+            OR (a.action = 'LOGIN_FAILED' AND a.entity_id = u.email)
+		WHERE a.user_id = $1 
+           OR (a.entity_type = 'user' AND a.entity_id = $2)
+           OR (a.action = 'LOGIN_FAILED' AND u.id = $1)
 		ORDER BY a.created_at DESC
 		LIMIT $3 OFFSET $4
 	`

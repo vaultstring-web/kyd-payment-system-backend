@@ -265,8 +265,9 @@ func (r *UserRepository) Update(ctx context.Context, user *domain.User) error {
 			password_hash = $9, failed_login_attempts = $10, locked_until = $11,
 			updated_at = $12, email_hash = $13, phone_hash = $14,
 			totp_secret = $15, is_totp_enabled = $16,
-			bio = $17, city = $18, postal_code = $19, tax_id = $20
-		WHERE id = $21
+			bio = $17, city = $18, postal_code = $19, tax_id = $20,
+			is_active = $21
+		WHERE id = $22
 	`
 
 	_, err = r.db.ExecContext(ctx, query,
@@ -275,6 +276,7 @@ func (r *UserRepository) Update(ctx context.Context, user *domain.User) error {
 		user.PasswordHash, user.FailedLoginAttempts, user.LockedUntil,
 		user.UpdatedAt, emailHash, phoneHash, encTOTPSecret, user.IsTOTPEnabled,
 		user.Bio, user.City, user.PostalCode, user.TaxID,
+		user.IsActive,
 		user.ID,
 	)
 

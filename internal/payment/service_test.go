@@ -61,6 +61,19 @@ func (m *MockRepository) CountByUserID(ctx context.Context, userID uuid.UUID) (i
 	return args.Int(0), args.Error(1)
 }
 
+func (m *MockRepository) FindByWalletID(ctx context.Context, walletID uuid.UUID, limit, offset int) ([]*domain.Transaction, error) {
+	args := m.Called(ctx, walletID, limit, offset)
+	if args.Get(0) == nil {
+		return nil, args.Error(1)
+	}
+	return args.Get(0).([]*domain.Transaction), args.Error(1)
+}
+
+func (m *MockRepository) CountByWalletID(ctx context.Context, walletID uuid.UUID) (int, error) {
+	args := m.Called(ctx, walletID)
+	return args.Int(0), args.Error(1)
+}
+
 func (m *MockRepository) GetDailyTotal(ctx context.Context, userID uuid.UUID, currency domain.Currency) (decimal.Decimal, error) {
 	args := m.Called(ctx, userID, currency)
 	return args.Get(0).(decimal.Decimal), args.Error(1)
@@ -99,9 +112,38 @@ func (m *MockRepository) SumEarnings(ctx context.Context) (decimal.Decimal, erro
 	return args.Get(0).(decimal.Decimal), args.Error(1)
 }
 
+func (m *MockRepository) SumDailyVolume(ctx context.Context) (decimal.Decimal, error) {
+	args := m.Called(ctx)
+	return args.Get(0).(decimal.Decimal), args.Error(1)
+}
+
 func (m *MockRepository) CountAll(ctx context.Context) (int, error) {
 	args := m.Called(ctx)
 	return args.Int(0), args.Error(1)
+}
+
+func (m *MockRepository) FindAll(ctx context.Context, limit, offset int) ([]*domain.Transaction, error) {
+	args := m.Called(ctx, limit, offset)
+	if args.Get(0) == nil {
+		return nil, args.Error(1)
+	}
+	return args.Get(0).([]*domain.Transaction), args.Error(1)
+}
+
+func (m *MockRepository) GetTransactionVolume(ctx context.Context, months int) ([]*domain.TransactionVolume, error) {
+	args := m.Called(ctx, months)
+	if args.Get(0) == nil {
+		return nil, args.Error(1)
+	}
+	return args.Get(0).([]*domain.TransactionVolume), args.Error(1)
+}
+
+func (m *MockRepository) GetSystemStats(ctx context.Context) (*domain.SystemStats, error) {
+	args := m.Called(ctx)
+	if args.Get(0) == nil {
+		return nil, args.Error(1)
+	}
+	return args.Get(0).(*domain.SystemStats), args.Error(1)
 }
 
 func (m *MockRepository) FindFlagged(ctx context.Context, limit, offset int) ([]*domain.Transaction, error) {
@@ -154,6 +196,11 @@ func (m *MockWalletRepository) DebitWallet(ctx context.Context, walletID uuid.UU
 }
 
 func (m *MockWalletRepository) CreditWallet(ctx context.Context, walletID uuid.UUID, amount decimal.Decimal) error {
+	args := m.Called(ctx, walletID, amount)
+	return args.Error(0)
+}
+
+func (m *MockWalletRepository) ReserveFunds(ctx context.Context, walletID uuid.UUID, amount decimal.Decimal) error {
 	args := m.Called(ctx, walletID, amount)
 	return args.Error(0)
 }
@@ -283,6 +330,11 @@ func (m *MockSecurityRepository) LogSecurityEvent(ctx context.Context, event *do
 	return args.Error(0)
 }
 
+func (m *MockSecurityRepository) AddToBlocklist(ctx context.Context, entry *domain.BlocklistEntry) error {
+	args := m.Called(ctx, entry)
+	return args.Error(0)
+}
+
 // --- Tests ---
 
 func TestInitiatePayment_FeeCalculation(t *testing.T) {
@@ -388,6 +440,7 @@ func TestInitiatePayment_FeeCalculation(t *testing.T) {
 	// Mock Security
 	mockSecurityRepo.On("IsBlacklisted", mock.Anything, mock.Anything).Return(false, nil)
 	mockSecurityRepo.On("LogSecurityEvent", mock.Anything, mock.Anything).Return(nil)
+	mockSecurityRepo.On("AddToBlocklist", mock.Anything, mock.Anything).Return(nil)
 
 	// Execute
 	resp, err := service.InitiatePayment(ctx, req)
@@ -411,8 +464,9 @@ func TestGetReceipt_Success(t *testing.T) {
 	mockLog := new(MockLogger)
 	mockNotifier := new(MockNotificationService)
 	mockAuditRepo := new(MockAuditRepository)
+	mockSecurityRepo := new(MockSecurityRepository)
 
-	service := NewService(mockRepo, mockWalletRepo, mockForex, mockLedger, mockUserRepo, mockNotifier, mockAuditRepo, mockLog, nil)
+	service := NewService(mockRepo, mockWalletRepo, mockForex, mockLedger, mockUserRepo, mockNotifier, mockAuditRepo, mockSecurityRepo, mockLog, nil)
 
 	ctx := context.Background()
 	txID := uuid.New()
@@ -430,7 +484,7 @@ func TestGetReceipt_Success(t *testing.T) {
 		Status:      domain.TransactionStatusCompleted,
 		CreatedAt:   time.Now(),
 		Reference:   "REF123",
-		Description: &desc,
+		Description: desc,
 	}
 
 	sender := &domain.User{FirstName: "John", LastName: "Doe"}

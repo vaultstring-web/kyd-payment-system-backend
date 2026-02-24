@@ -391,7 +391,6 @@ type TransactionDetail struct {
 }
 
 func (s *Service) GetTransactionHistory(ctx context.Context, walletID, userID uuid.UUID, limit, offset int) ([]*TransactionDetail, int, error) {
-	// Verify wallet exists and belongs to user
 	wallet, err := s.repo.FindByID(ctx, walletID)
 	if err != nil {
 		return nil, 0, err
@@ -400,6 +399,18 @@ func (s *Service) GetTransactionHistory(ctx context.Context, walletID, userID uu
 		return nil, 0, fmt.Errorf("unauthorized access to wallet")
 	}
 
+	return s.getTransactionHistoryInternal(ctx, walletID, limit, offset)
+}
+
+func (s *Service) GetTransactionHistoryAdmin(ctx context.Context, walletID uuid.UUID, limit, offset int) ([]*TransactionDetail, int, error) {
+	_, err := s.repo.FindByID(ctx, walletID)
+	if err != nil {
+		return nil, 0, err
+	}
+	return s.getTransactionHistoryInternal(ctx, walletID, limit, offset)
+}
+
+func (s *Service) getTransactionHistoryInternal(ctx context.Context, walletID uuid.UUID, limit, offset int) ([]*TransactionDetail, int, error) {
 	txs, err := s.txRepo.FindByWalletID(ctx, walletID, limit, offset)
 	if err != nil {
 		return nil, 0, err
@@ -407,36 +418,30 @@ func (s *Service) GetTransactionHistory(ctx context.Context, walletID, userID uu
 
 	total, err := s.txRepo.CountByWalletID(ctx, walletID)
 	if err != nil {
-		// Log error but continue with 0 total if count fails
 		s.logger.Error("Failed to count wallet transactions", map[string]interface{}{
 			"wallet_id": walletID,
 			"error":     err.Error(),
 		})
 	}
 
-	// Enrich transactions
 	var details []*TransactionDetail
 	for _, tx := range txs {
 		detail := &TransactionDetail{Transaction: tx}
 
-		// Fetch Sender Name
 		if sender, err := s.userRepo.FindByID(ctx, tx.SenderID); err == nil {
 			detail.SenderName = sender.FirstName + " " + sender.LastName
 		}
 
-		// Fetch Receiver Name
 		if receiver, err := s.userRepo.FindByID(ctx, tx.ReceiverID); err == nil {
 			detail.ReceiverName = receiver.FirstName + " " + receiver.LastName
 		}
 
-		// Fetch Sender Wallet Number
 		if tx.SenderWalletID != nil {
 			if sWallet, err := s.repo.FindByID(ctx, *tx.SenderWalletID); err == nil && sWallet.WalletAddress != nil {
 				detail.SenderWalletNumber = *sWallet.WalletAddress
 			}
 		}
 
-		// Fetch Receiver Wallet Number
 		if tx.ReceiverWalletID != nil {
 			if rWallet, err := s.repo.FindByID(ctx, *tx.ReceiverWalletID); err == nil && rWallet.WalletAddress != nil {
 				detail.ReceiverWalletNumber = *rWallet.WalletAddress
