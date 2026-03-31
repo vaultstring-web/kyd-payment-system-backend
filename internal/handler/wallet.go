@@ -102,6 +102,19 @@ func (h *WalletHandler) Deposit(w http.ResponseWriter, r *http.Request) {
 
 	req.WalletID = walletID
 
+	// Authorization: wallet owner or admin can perform top-up.
+	userID, hasUser := middleware.UserIDFromContext(r.Context())
+	userType, _ := middleware.UserTypeFromContext(r.Context())
+	targetWallet, findErr := h.service.GetWallet(r.Context(), walletID)
+	if findErr != nil {
+		h.respondError(w, http.StatusNotFound, "Wallet not found")
+		return
+	}
+	if !hasUser || (userType != "admin" && targetWallet.UserID != userID) {
+		h.respondError(w, http.StatusForbidden, "You are not allowed to top up this wallet")
+		return
+	}
+
 	if errs := h.validator.ValidateStructured(&req); errs != nil {
 		h.respondValidationErrors(w, errs)
 		return

@@ -8,7 +8,9 @@ import (
 	"crypto/rand"
 	"fmt"
 	"math/big"
+	"regexp"
 	"strconv"
+	"strings"
 	"time"
 
 	"kyd/internal/domain"
@@ -209,18 +211,18 @@ func (s *Service) GetWalletsWithFilter(ctx context.Context, limit, offset int, u
 		}
 
 		var formattedAddress string
-		if wallet.WalletAddress != nil && len(*wallet.WalletAddress) == 16 {
-			addr := *wallet.WalletAddress
-			formattedAddress = fmt.Sprintf("%s %s %s %s", addr[0:4], addr[4:8], addr[8:12], addr[12:16])
-		} else if wallet.WalletAddress != nil {
-			formattedAddress = *wallet.WalletAddress
+		displayAddress := resolvedDisplayWalletAddress(wallet)
+		if len(displayAddress) == 16 {
+			formattedAddress = fmt.Sprintf("%s %s %s %s", displayAddress[0:4], displayAddress[4:8], displayAddress[8:12], displayAddress[12:16])
+		} else {
+			formattedAddress = displayAddress
 		}
 
 		expiry := wallet.CreatedAt.AddDate(3, 0, 0).Format("01/06")
 
 		responses = append(responses, &BalanceResponse{
 			WalletID:               wallet.ID,
-			WalletAddress:          wallet.WalletAddress,
+			WalletAddress:          stringPtr(displayAddress),
 			FormattedWalletAddress: formattedAddress,
 			Currency:               wallet.Currency,
 			AvailableBalance:       wallet.AvailableBalance,
@@ -293,11 +295,11 @@ func (s *Service) GetUserWallets(ctx context.Context, userID uuid.UUID) ([]*Bala
 	var responses []*BalanceResponse
 	for _, wallet := range wallets {
 		var formattedAddress string
-		if wallet.WalletAddress != nil && len(*wallet.WalletAddress) == 16 {
-			addr := *wallet.WalletAddress
-			formattedAddress = fmt.Sprintf("%s %s %s %s", addr[0:4], addr[4:8], addr[8:12], addr[12:16])
-		} else if wallet.WalletAddress != nil {
-			formattedAddress = *wallet.WalletAddress
+		displayAddress := resolvedDisplayWalletAddress(wallet)
+		if len(displayAddress) == 16 {
+			formattedAddress = fmt.Sprintf("%s %s %s %s", displayAddress[0:4], displayAddress[4:8], displayAddress[8:12], displayAddress[12:16])
+		} else {
+			formattedAddress = displayAddress
 		}
 
 		// Simulate Expiry Date: CreatedAt + 3 years
@@ -305,7 +307,7 @@ func (s *Service) GetUserWallets(ctx context.Context, userID uuid.UUID) ([]*Bala
 
 		responses = append(responses, &BalanceResponse{
 			WalletID:               wallet.ID,
-			WalletAddress:          wallet.WalletAddress,
+			WalletAddress:          stringPtr(displayAddress),
 			FormattedWalletAddress: formattedAddress,
 			Currency:               wallet.Currency,
 			AvailableBalance:       wallet.AvailableBalance,
@@ -334,12 +336,12 @@ func (s *Service) GetBalance(ctx context.Context, walletID uuid.UUID) (*BalanceR
 	}
 
 	var formattedAddress string
-	if wallet.WalletAddress != nil && len(*wallet.WalletAddress) == 16 {
+	displayAddress := resolvedDisplayWalletAddress(wallet)
+	if len(displayAddress) == 16 {
 		// Format as 1234 5678 1234 5678
-		addr := *wallet.WalletAddress
-		formattedAddress = fmt.Sprintf("%s %s %s %s", addr[0:4], addr[4:8], addr[8:12], addr[12:16])
-	} else if wallet.WalletAddress != nil {
-		formattedAddress = *wallet.WalletAddress
+		formattedAddress = fmt.Sprintf("%s %s %s %s", displayAddress[0:4], displayAddress[4:8], displayAddress[8:12], displayAddress[12:16])
+	} else {
+		formattedAddress = displayAddress
 	}
 
 	// Simulate Expiry Date: CreatedAt + 3 years
@@ -347,7 +349,7 @@ func (s *Service) GetBalance(ctx context.Context, walletID uuid.UUID) (*BalanceR
 
 	return &BalanceResponse{
 		WalletID:               wallet.ID,
-		WalletAddress:          wallet.WalletAddress,
+		WalletAddress:          stringPtr(displayAddress),
 		FormattedWalletAddress: formattedAddress,
 		Currency:               wallet.Currency,
 		AvailableBalance:       wallet.AvailableBalance,
@@ -383,6 +385,7 @@ type LookupResponse struct {
 }
 
 func (s *Service) LookupWallet(ctx context.Context, address string) (*LookupResponse, error) {
+	address = normalizeWalletAddress(address)
 	wallet, err := s.repo.FindByAddress(ctx, address)
 	if err != nil {
 		return nil, err
@@ -401,6 +404,7 @@ func (s *Service) LookupWallet(ctx context.Context, address string) (*LookupResp
 }
 
 func (s *Service) SearchWallets(ctx context.Context, query string) ([]*LookupResponse, error) {
+	query = normalizeWalletAddress(query)
 	if len(query) < 3 {
 		return []*LookupResponse{}, nil
 	}
@@ -416,10 +420,7 @@ func (s *Service) SearchWallets(ctx context.Context, query string) ([]*LookupRes
 		if err != nil {
 			continue
 		}
-		addr := ""
-		if wallet.WalletAddress != nil {
-			addr = *wallet.WalletAddress
-		}
+		addr := resolvedDisplayWalletAddress(wallet)
 		responses = append(responses, &LookupResponse{
 			Name:     fmt.Sprintf("%s %s", user.FirstName, user.LastName),
 			Currency: wallet.Currency,
@@ -529,10 +530,65 @@ type UserRepository interface {
 }
 
 func (s *Service) generateWalletNumber() (string, error) {
-	// Generate a 16-digit random number
-	n, err := rand.Int(rand.Reader, big.NewInt(10000000000000000))
-	if err != nil {
-		return "", err
+	// Generate a unique 16-digit number; retry on collision.
+	for i := 0; i < 10; i++ {
+		n, err := rand.Int(rand.Reader, big.NewInt(10000000000000000))
+		if err != nil {
+			return "", err
+		}
+		candidate := fmt.Sprintf("%016d", n)
+
+		_, err = s.repo.FindByAddress(context.Background(), candidate)
+		if err != nil {
+			// ErrWalletNotFound means candidate is free to use.
+			if err == errors.ErrWalletNotFound {
+				return candidate, nil
+			}
+			return "", err
+		}
 	}
-	return fmt.Sprintf("%016d", n), nil
+	return "", errors.New("failed to generate unique wallet number")
+}
+
+var nonDigitWalletChars = regexp.MustCompile(`\D`)
+
+func normalizeWalletAddress(v string) string {
+	v = strings.TrimSpace(v)
+	if v == "" {
+		return v
+	}
+	// For digital card-style numbers, remove spaces/separators.
+	// Leave legacy alphanumeric addresses untouched except trimming.
+	digits := nonDigitWalletChars.ReplaceAllString(v, "")
+	if len(digits) >= 8 {
+		return digits
+	}
+	return strings.ReplaceAll(v, " ", "")
+}
+
+func resolvedDisplayWalletAddress(wallet *domain.Wallet) string {
+	if wallet != nil && wallet.WalletAddress != nil {
+		addr := normalizeWalletAddress(*wallet.WalletAddress)
+		if len(addr) == 16 && nonDigitWalletChars.ReplaceAllString(addr, "") == addr {
+			return addr
+		}
+	}
+	// Fallback to deterministic 16-digit digital number tied to wallet ID.
+	return digitalWalletNumberFromWalletID(wallet.ID)
+}
+
+func digitalWalletNumberFromWalletID(id uuid.UUID) string {
+	raw := strings.ToLower(id.String())
+	mapped := strings.NewReplacer(
+		"a", "1", "b", "2", "c", "3", "d", "4", "e", "5", "f", "6", "-", "",
+	).Replace(raw)
+	digits := nonDigitWalletChars.ReplaceAllString(mapped, "")
+	return (digits + "4539102834756192")[:16]
+}
+
+func stringPtr(v string) *string {
+	if v == "" {
+		return nil
+	}
+	return &v
 }

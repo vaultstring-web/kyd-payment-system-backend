@@ -55,5 +55,12 @@ security-report.json
 *.pem
 *.key
 
+# Large local migration artifact - must never be committed
+migrations/000_master_consolidated.down.sql
+
+# Local seed tooling dependencies
+seeds/consolidated/node_modules/
+seeds/consolidated/package-lock.json
+
 # Ignore cursor AI rules
 .cursor\\rules\\codacy.mdc

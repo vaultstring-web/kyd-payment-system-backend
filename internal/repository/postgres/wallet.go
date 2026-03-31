@@ -4,6 +4,8 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"regexp"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -130,10 +132,23 @@ func (r *WalletRepository) ReserveFunds(ctx context.Context, walletID uuid.UUID,
 
 func (r *WalletRepository) FindByAddress(ctx context.Context, address string) (*domain.Wallet, error) {
 	wallet := &domain.Wallet{}
-	query := `SELECT * FROM customer_schema.wallets WHERE wallet_address = $1`
+	address = strings.TrimSpace(address)
+	query := `SELECT * FROM customer_schema.wallets WHERE REPLACE(wallet_address, ' ', '') = REPLACE($1, ' ', '')`
 	err := r.db.GetContext(ctx, wallet, query, address)
 	if err != nil {
 		if err == sql.ErrNoRows {
+			// Fallback: support deterministic digital wallet number derived from wallet UUID.
+			norm := normalizeWalletLookup(address)
+			if len(norm) == 16 {
+				var all []*domain.Wallet
+				if selErr := r.db.SelectContext(ctx, &all, `SELECT * FROM customer_schema.wallets`); selErr == nil {
+					for _, w := range all {
+						if digitalWalletNumberFromID(w.ID) == norm {
+							return w, nil
+						}
+					}
+				}
+			}
 			return nil, errors.ErrWalletNotFound
 		}
 		return nil, errors.Wrap(err, "failed to find wallet by address")
@@ -143,10 +158,33 @@ func (r *WalletRepository) FindByAddress(ctx context.Context, address string) (*
 
 func (r *WalletRepository) SearchByAddress(ctx context.Context, partialAddress string, limit int) ([]*domain.Wallet, error) {
 	var wallets []*domain.Wallet
-	query := `SELECT * FROM customer_schema.wallets WHERE wallet_address LIKE $1 LIMIT $2`
+	partialAddress = strings.TrimSpace(partialAddress)
+	query := `SELECT * FROM customer_schema.wallets WHERE REPLACE(wallet_address, ' ', '') LIKE REPLACE($1, ' ', '') LIMIT $2`
 	err := r.db.SelectContext(ctx, &wallets, query, "%"+partialAddress+"%", limit)
 	if err != nil {
 		return nil, errors.Wrap(err, "failed to search wallets by address")
+	}
+	// Fallback search by deterministic digital wallet number.
+	norm := normalizeWalletLookup(partialAddress)
+	if len(norm) >= 3 && len(wallets) < limit {
+		var all []*domain.Wallet
+		if selErr := r.db.SelectContext(ctx, &all, `SELECT * FROM customer_schema.wallets`); selErr == nil {
+			exists := map[uuid.UUID]bool{}
+			for _, w := range wallets {
+				exists[w.ID] = true
+			}
+			for _, w := range all {
+				if exists[w.ID] {
+					continue
+				}
+				if strings.Contains(digitalWalletNumberFromID(w.ID), norm) {
+					wallets = append(wallets, w)
+					if len(wallets) >= limit {
+						break
+					}
+				}
+			}
+		}
 	}
 	return wallets, nil
 }
@@ -253,4 +291,23 @@ func (r *WalletRepository) GetTotalBalanceForUser(ctx context.Context, userID uu
 		return decimal.Zero, nil
 	}
 	return total.Decimal, nil
+}
+
+var nonDigitsForWalletLookup = regexp.MustCompile(`\D`)
+
+func normalizeWalletLookup(v string) string {
+	v = strings.TrimSpace(v)
+	if v == "" {
+		return v
+	}
+	return nonDigitsForWalletLookup.ReplaceAllString(v, "")
+}
+
+func digitalWalletNumberFromID(id uuid.UUID) string {
+	raw := strings.ToLower(id.String())
+	mapped := strings.NewReplacer(
+		"a", "1", "b", "2", "c", "3", "d", "4", "e", "5", "f", "6", "-", "",
+	).Replace(raw)
+	digits := nonDigitsForWalletLookup.ReplaceAllString(mapped, "")
+	return (digits + "4539102834756192")[:16]
 }
