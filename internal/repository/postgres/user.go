@@ -396,7 +396,12 @@ func (r *UserRepository) FindAll(ctx context.Context, limit, offset int, userTyp
 			id, email, phone, first_name, last_name, user_type, kyc_level, kyc_status,
 			country_code, date_of_birth, business_name, risk_score, is_active,
 			failed_login_attempts, locked_until, last_login, created_at, updated_at,
-			bio, city, postal_code, tax_id, auth_provider, provider_id
+			COALESCE(bio, '') as bio,
+			COALESCE(city, '') as city,
+			COALESCE(postal_code, '') as postal_code,
+			COALESCE(tax_id, '') as tax_id,
+			COALESCE(auth_provider, '') as auth_provider,
+			provider_id
 		FROM customer_schema.users
 	`
 	args := []interface{}{}
@@ -440,7 +445,12 @@ func (r *UserRepository) FindAllWithFilters(ctx context.Context, limit, offset i
 			id, email, phone, first_name, last_name, user_type, kyc_level, kyc_status,
 			country_code, date_of_birth, business_name, risk_score, is_active,
 			failed_login_attempts, locked_until, last_login, created_at, updated_at,
-			bio, city, postal_code, tax_id, auth_provider, provider_id
+			COALESCE(bio, '') as bio,
+			COALESCE(city, '') as city,
+			COALESCE(postal_code, '') as postal_code,
+			COALESCE(tax_id, '') as tax_id,
+			COALESCE(auth_provider, '') as auth_provider,
+			provider_id
 		FROM customer_schema.users
 	`
 

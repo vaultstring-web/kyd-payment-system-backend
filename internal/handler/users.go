@@ -92,6 +92,13 @@ func (h *UsersHandler) List(w http.ResponseWriter, r *http.Request) {
 
 	users, total, err := h.service.ListUsersAdmin(r.Context(), limit, offset, userType, kycStatus)
 	if err != nil {
+		h.logger.Error("Admin list users failed", map[string]interface{}{
+			"error":      err.Error(),
+			"limit":      limit,
+			"offset":     offset,
+			"user_type":  userType,
+			"kyc_status": kycStatus,
+		})
 		respondError(w, http.StatusInternalServerError, "Failed to list users")
 		return
 	}

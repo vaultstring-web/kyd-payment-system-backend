@@ -71,11 +71,18 @@ func loadEnv() {
 
 type userStatusChecker struct {
 	repo *postgres.UserRepository
+	log  logger.Logger
 }
 
 func (c *userStatusChecker) IsUserActive(ctx context.Context, id uuid.UUID) (bool, error) {
 	u, err := c.repo.FindByID(ctx, id)
 	if err != nil {
+		if c.log != nil {
+			c.log.Error("IsUserActive: FindByID failed", map[string]interface{}{
+				"user_id": id.String(),
+				"error":   err.Error(),
+			})
+		}
 		return false, err
 	}
 	if u.UserType == domain.UserTypeAdmin {
@@ -274,7 +281,7 @@ func main() {
 	r.Use(middleware.BodyLimit(1 << 20)) // 1MB global cap
 	r.Use(middleware.NewRateLimiter(redisClient, 150, time.Minute).WithAdaptive(10, 30*time.Minute).Limit)
 
-	authMW := middleware.NewAuthMiddlewareWithUserStatus(cfg.JWT.Secret, blacklist, &userStatusChecker{repo: userRepo})
+	authMW := middleware.NewAuthMiddlewareWithUserStatus(cfg.JWT.Secret, blacklist, &userStatusChecker{repo: userRepo, log: log})
 	idemMW := middleware.NewIdempotencyMiddleware(redisClient, 24*time.Hour)
 	auditMW := middleware.NewAuditMiddleware(auditRepo, log)
 
