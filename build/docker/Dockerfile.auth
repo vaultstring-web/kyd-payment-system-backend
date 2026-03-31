@@ -1,6 +1,6 @@
 # ==============================================================================
 # Auth Service Dockerfile - build/docker/Dockerfile.auth
-FROM golang:1.24.11-alpine AS builder
+FROM golang:1.25.0-alpine AS builder
 
 WORKDIR /app
 
@@ -10,6 +10,9 @@ COPY go.mod go.sum ./
 ENV GOPROXY=https://proxy.golang.org,direct
 RUN go mod download
 
+# Install Air for hot reload in development
+RUN go install github.com/air-verse/air@latest
+
 COPY . .
 
 RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build \
@@ -17,7 +20,7 @@ RUN CGO_ENABLED=0 GOOS=linux GOARCH=amd64 go build \
     -o /app/bin/auth-service \
     ./cmd/auth
 
-FROM alpine:3.18
+FROM alpine:3.20
 
 RUN apk --no-cache add ca-certificates tzdata
 

@@ -241,3 +241,16 @@ func (r *WalletRepository) DebitWallet(ctx context.Context, id uuid.UUID, amount
 	}
 	return nil
 }
+
+func (r *WalletRepository) GetTotalBalanceForUser(ctx context.Context, userID uuid.UUID) (decimal.Decimal, error) {
+	var total decimal.NullDecimal
+	query := `SELECT SUM(available_balance) FROM customer_schema.wallets WHERE user_id = $1`
+	err := r.db.GetContext(ctx, &total, query, userID)
+	if err != nil {
+		return decimal.Zero, errors.Wrap(err, "failed to get total balance for user")
+	}
+	if !total.Valid {
+		return decimal.Zero, nil
+	}
+	return total.Decimal, nil
+}

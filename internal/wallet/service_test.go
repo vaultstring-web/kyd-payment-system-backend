@@ -93,6 +93,19 @@ func (m *MockRepository) FindAll(ctx context.Context, limit, offset int) ([]*dom
 	return args.Get(0).([]*domain.Wallet), args.Error(1)
 }
 
+func (m *MockRepository) FindAllWithFilter(ctx context.Context, limit, offset int, userID *uuid.UUID) ([]*domain.Wallet, error) {
+	args := m.Called(ctx, limit, offset, userID)
+	if args.Get(0) == nil {
+		return nil, args.Error(1)
+	}
+	return args.Get(0).([]*domain.Wallet), args.Error(1)
+}
+
+func (m *MockRepository) CountWithFilter(ctx context.Context, userID *uuid.UUID) (int, error) {
+	args := m.Called(ctx, userID)
+	return args.Int(0), args.Error(1)
+}
+
 type MockTransactionRepository struct {
 	mock.Mock
 }

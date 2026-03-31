@@ -201,6 +201,30 @@ func (h *ComplianceHandler) ReviewApplication(w http.ResponseWriter, r *http.Req
 	h.respondJSON(w, http.StatusOK, map[string]string{"message": "kyc status updated successfully"})
 }
 
+func (h *ComplianceHandler) GetComplianceReports(w http.ResponseWriter, r *http.Request) {
+	// Admin Check
+	ut, ok := middleware.UserTypeFromContext(r.Context())
+	if !ok || ut != "admin" {
+		h.respondError(w, http.StatusForbidden, "admin access required")
+		return
+	}
+
+	// Mock reports for now
+	type Report struct {
+		ID          string `json:"id"`
+		Type        string `json:"type"`
+		Status      string `json:"status"`
+		GeneratedAt string `json:"generated_at"`
+		URL         string `json:"url"`
+	}
+	reports := []Report{
+		{ID: "rep-001", Type: "AML", Status: "completed", GeneratedAt: "2024-01-24T10:00:00Z", URL: "#"},
+		{ID: "rep-002", Type: "KYC", Status: "pending", GeneratedAt: "2024-01-25T12:00:00Z", URL: "#"},
+	}
+
+	h.respondJSON(w, http.StatusOK, map[string]interface{}{"reports": reports})
+}
+
 // Helpers
 
 func (h *ComplianceHandler) respondJSON(w http.ResponseWriter, status int, data interface{}) {

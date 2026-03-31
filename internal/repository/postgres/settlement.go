@@ -6,6 +6,8 @@ package postgres
 import (
 	"context"
 	"database/sql"
+	"fmt"
+	"strings"
 
 	"kyd/internal/domain"
 	"kyd/pkg/errors"
@@ -80,8 +82,8 @@ func (r *SettlementRepository) FindByID(ctx context.Context, id uuid.UUID) (*dom
 	return &settlement, nil
 }
 
-func (r *SettlementRepository) FindAll(ctx context.Context, limit, offset int) ([]domain.Settlement, error) {
-	var settlements []domain.Settlement
+func (r *SettlementRepository) FindAll(ctx context.Context, limit, offset int) ([]*domain.Settlement, error) {
+	var settlements []*domain.Settlement
 	query := `
 		SELECT 
 			id, batch_reference, network, transaction_hash, source_account,
@@ -103,6 +105,82 @@ func (r *SettlementRepository) CountAll(ctx context.Context) (int, error) {
 	var total int
 	query := `SELECT COUNT(*) FROM customer_schema.settlements`
 	err := r.db.GetContext(ctx, &total, query)
+	if err != nil {
+		return 0, errors.Wrap(err, "failed to count settlements")
+	}
+	return total, nil
+}
+
+func (r *SettlementRepository) FindAllWithFilters(ctx context.Context, limit, offset int, status string, currency string, network string) ([]*domain.Settlement, error) {
+	var settlements []*domain.Settlement
+	query := `
+		SELECT 
+			id, batch_reference, network, transaction_hash, source_account,
+			destination_account, total_amount, currency, fee_amount, fee_currency,
+			status, submission_count, last_submitted_at, confirmed_at, completed_at,
+			reconciliation_id, metadata, created_at, updated_at
+		FROM customer_schema.settlements
+	`
+
+	var (
+		clauses []string
+		args    []interface{}
+	)
+
+	if strings.TrimSpace(status) != "" {
+		args = append(args, strings.TrimSpace(status))
+		clauses = append(clauses, fmt.Sprintf("status = $%d", len(args)))
+	}
+	if strings.TrimSpace(currency) != "" {
+		args = append(args, strings.TrimSpace(currency))
+		clauses = append(clauses, fmt.Sprintf("currency = $%d", len(args)))
+	}
+	if strings.TrimSpace(network) != "" {
+		args = append(args, strings.TrimSpace(network))
+		clauses = append(clauses, fmt.Sprintf("network = $%d", len(args)))
+	}
+
+	if len(clauses) > 0 {
+		query += " WHERE " + strings.Join(clauses, " AND ")
+	}
+
+	query += ` ORDER BY created_at DESC LIMIT $` + fmt.Sprint(len(args)+1) + ` OFFSET $` + fmt.Sprint(len(args)+2)
+	args = append(args, limit, offset)
+
+	err := r.db.SelectContext(ctx, &settlements, query, args...)
+	if err != nil {
+		return nil, errors.Wrap(err, "failed to list settlements")
+	}
+	return settlements, nil
+}
+
+func (r *SettlementRepository) CountAllWithFilters(ctx context.Context, status string, currency string, network string) (int, error) {
+	var total int
+	query := `SELECT COUNT(*) FROM customer_schema.settlements`
+
+	var (
+		clauses []string
+		args    []interface{}
+	)
+
+	if strings.TrimSpace(status) != "" {
+		args = append(args, strings.TrimSpace(status))
+		clauses = append(clauses, fmt.Sprintf("status = $%d", len(args)))
+	}
+	if strings.TrimSpace(currency) != "" {
+		args = append(args, strings.TrimSpace(currency))
+		clauses = append(clauses, fmt.Sprintf("currency = $%d", len(args)))
+	}
+	if strings.TrimSpace(network) != "" {
+		args = append(args, strings.TrimSpace(network))
+		clauses = append(clauses, fmt.Sprintf("network = $%d", len(args)))
+	}
+
+	if len(clauses) > 0 {
+		query += " WHERE " + strings.Join(clauses, " AND ")
+	}
+
+	err := r.db.GetContext(ctx, &total, query, args...)
 	if err != nil {
 		return 0, errors.Wrap(err, "failed to count settlements")
 	}

@@ -2,6 +2,7 @@ package handler
 
 import (
 	"encoding/json"
+	"errors"
 	"net/http"
 	"time"
 
@@ -32,7 +33,13 @@ func (h *SecurityHandler) GetSecurityEvents(w http.ResponseWriter, r *http.Reque
 	}
 
 	limit, offset := parsePagination(r)
-	events, total, err := h.service.GetSecurityEvents(r.Context(), limit, offset)
+	filter, err := parseSecurityEventFilter(r)
+	if err != nil {
+		respondError(w, http.StatusBadRequest, err.Error())
+		return
+	}
+
+	events, total, err := h.service.GetSecurityEvents(r.Context(), filter, limit, offset)
 	if err != nil {
 		respondError(w, http.StatusInternalServerError, "Failed to fetch security events")
 		return
@@ -40,8 +47,45 @@ func (h *SecurityHandler) GetSecurityEvents(w http.ResponseWriter, r *http.Reque
 
 	respondJSON(w, http.StatusOK, map[string]interface{}{
 		"events": events,
+		"items":  events,
 		"total":  total,
+		"limit":  limit,
+		"offset": offset,
 	})
+}
+
+func parseSecurityEventFilter(r *http.Request) (*security.EventFilter, error) {
+	q := r.URL.Query()
+	filter := &security.EventFilter{}
+
+	if v := q.Get("type"); v != "" {
+		filter.Type = &v
+	}
+	if v := q.Get("severity"); v != "" {
+		filter.Severity = &v
+	}
+	if v := q.Get("status"); v != "" {
+		filter.Status = &v
+	}
+	if v := q.Get("ip"); v != "" {
+		filter.IPAddress = &v
+	}
+	if v := q.Get("q"); v != "" {
+		filter.Query = &v
+	}
+	if v := q.Get("user_id"); v != "" {
+		id, err := uuid.Parse(v)
+		if err != nil {
+			return nil, errors.New("Invalid user_id")
+		}
+		filter.UserID = &id
+	}
+
+	// If everything is empty, return nil to preserve the original behavior.
+	if filter.Type == nil && filter.Severity == nil && filter.Status == nil && filter.UserID == nil && filter.IPAddress == nil && filter.Query == nil {
+		return nil, nil
+	}
+	return filter, nil
 }
 
 func (h *SecurityHandler) UpdateSecurityEvent(w http.ResponseWriter, r *http.Request) {

@@ -25,15 +25,21 @@ type Repository interface {
 	UpdateStatus(ctx context.Context, id uuid.UUID, status string, notes *string, verifiedBy *uuid.UUID) error
 }
 
+type AuditRepository interface {
+	Create(ctx context.Context, log *domain.AuditLog) error
+}
+
 type Service struct {
 	repo         Repository
 	userProvider UserProvider
+	auditRepo    AuditRepository
 }
 
-func NewService(repo Repository, userProvider UserProvider) *Service {
+func NewService(repo Repository, userProvider UserProvider, auditRepo AuditRepository) *Service {
 	return &Service{
 		repo:         repo,
 		userProvider: userProvider,
+		auditRepo:    auditRepo,
 	}
 }
 
@@ -66,11 +72,25 @@ func (s *Service) SubmitKYC(ctx context.Context, req *SubmitKYCRequest) (*domain
 		return nil, err
 	}
 
+	// Log audit trail
+	if s.auditRepo != nil {
+		_ = s.auditRepo.Create(ctx, &domain.AuditLog{
+			ID:         uuid.New(),
+			Action:     "kyc_submission",
+			Resource:   "kyc_documents",
+			ResourceID: doc.ID.String(),
+			UserID:     &req.UserID,
+			Status:     "success",
+			CreatedAt:  time.Now(),
+			Metadata: domain.Metadata{
+				"document_type":   req.DocumentType,
+				"issuing_country": req.IssuingCountry,
+			},
+		})
+	}
+
 	// Update user status
 	if err := s.userProvider.UpdateKYCStatus(ctx, req.UserID, domain.KYCStatusPending); err != nil {
-		// Log error but don't fail the request? Or rollback?
-		// ideally rollback, but for now we return error.
-		// Note: repo.Create was already committed if not in transaction.
 		return nil, errors.Wrap(err, "failed to update user kyc status")
 	}
 
@@ -165,7 +185,22 @@ func (s *Service) ReviewApplication(ctx context.Context, userID uuid.UUID, statu
 		// In a real system we might want better error handling/logging here
 	}
 
-	// TODO: Log audit trail or create a review record (out of scope for now, handled by controller audit log)
+	// Log audit trail
+	if s.auditRepo != nil {
+		_ = s.auditRepo.Create(ctx, &domain.AuditLog{
+			ID:         uuid.New(),
+			Action:     "kyc_review",
+			Resource:   "users",
+			ResourceID: userID.String(),
+			UserID:     &reviewerID,
+			Status:     "success",
+			CreatedAt:  time.Now(),
+			Metadata: domain.Metadata{
+				"new_status": status,
+				"reason":     reason,
+			},
+		})
+	}
 
 	return nil
 }

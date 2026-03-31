@@ -80,6 +80,12 @@ func (m *AuditMiddleware) Audit(next http.Handler) http.Handler {
 				return
 			}
 
+			// FORENSICS: Attempt to geolocate IP (in a real system, you'd use a GeoIP provider)
+			location := "Unknown"
+			if ip != "127.0.0.1" && ip != "::1" && ip != "" {
+				location = "Forensic Investigation Required" // Placeholder for GeoIP logic
+			}
+
 			logEntry := &domain.AuditLog{
 				ID:         uuid.New(),
 				UserID:     userID,
@@ -88,12 +94,40 @@ func (m *AuditMiddleware) Audit(next http.Handler) http.Handler {
 				UserAgent:  ua,
 				RequestID:  reqID,
 				StatusCode: status,
-				CreatedAt:  time.Now(),
+				Metadata: domain.Metadata{
+					"forensics_location": location,
+					"device_fingerprint": ua, // Simplified fingerprint
+					"timestamp_nano":     time.Now().UnixNano(),
+				},
+				CreatedAt: time.Now(),
 			}
 
 			if err := m.repo.Create(ctx, logEntry); err != nil {
 				m.logger.Error("Failed to create audit log", map[string]interface{}{
 					"error": err.Error(),
+				})
+			}
+
+			// ALERT: Log suspicious activity as a Security Event if status is 403/401
+			if status == 401 || status == 403 {
+				severity := domain.SecuritySeverityMedium
+				if status == 403 {
+					severity = domain.SecuritySeverityHigh
+				}
+				
+				_ = m.repo.Create(ctx, &domain.AuditLog{
+					ID:         uuid.New(),
+					UserID:     userID,
+					Action:     "SECURITY_ALERT: Unauthorized Access Attempt",
+					IPAddress:  ip,
+					UserAgent:  ua,
+					RequestID:  reqID,
+					StatusCode: status,
+					Metadata: domain.Metadata{
+						"severity": severity,
+						"type":     "access_denied",
+					},
+					CreatedAt: time.Now(),
 				})
 			}
 		}(wrapped.statusCode, ctxUserID, reqID, ip, ua, method, path)

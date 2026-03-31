@@ -17,31 +17,43 @@ This guide describes how to set up the KYD Payment System environment using Dock
 
 ## 2. Running the System
 
-Start all services (Backend, Database, Redis, Frontends):
+Start backend services (Database, Redis, Gateway, Auth, Payment, Wallet, Forex, Settlement):
 
 ```bash
 docker-compose up --build
 ```
 
+To include frontends (requires sibling directories `admin` and `vaultstring-frontend`):
+
+```bash
+docker-compose --profile frontend up --build
+```
+
 *   **API Gateway**: `http://localhost:9000`
-*   **Customer Frontend**: `http://localhost:3012`
-*   **Admin Portal**: `http://localhost:3016`
+*   **Customer Frontend**: `http://localhost:3012` (requires `--profile frontend`)
+*   **Admin Portal**: `http://localhost:3016` (requires `--profile frontend`)
 
-## 3. Seeding Data
+## 3. Migrations and Seeding
 
-The database starts empty (or with only schema). To populate it with test users (John, Wang, Admin) and initial wallet balances:
+The database starts empty. Run migrations first, then seed:
 
-**Run the Seeder:**
+**Run migrations** (creates schema):
+```powershell
+docker compose up -d postgres redis
+docker compose --profile tools run --rm migrate-runner
+```
+
+**Run the seeder** (populates test users and wallets):
 ```powershell
 docker compose --profile tools run --rm seed-runner
 ```
-*Note: This runs a container that connects to the database and inserts sample data.*
+*Note: Ensure postgres is running before migrate and seed.*
 
 ## 4. Test Credentials
 
 Use these pre-seeded accounts to test the system:
 
-est Accounts Created:
+Test Accounts Created:
 ---------------------------------------------------
 Admin User:
   Email:    admin@kyd.com
@@ -63,12 +75,12 @@ Follow these steps to verify the "Happy Path":
 
 ### Step 1: Login as Sender
 1.  Open **Customer Frontend**: [http://localhost:3012](http://localhost:3012)
-2.  Login with **John Doe** (`john.doe@example.com` / `Password123!`).
+2.  Login with **John Doe** (`john.doe@example.com` / `password123`).
 3.  Note the **MWK** wallet balance.
 
 ### Step 2: Send Money
 1.  Click **"Send Money"** in the dashboard.
-2.  **Receiver**: Search for "Wei Wang" or use wallet ID (you can find Wang's wallet ID in the "Wallets" API or database).
+2.  **Receiver**: Search for "Jane Smith" or use wallet ID (you can find Jane's wallet ID in the "Wallets" API or database).
     *   *Tip: Use `./scripts/verify-fixes.ps1` output to see wallet IDs if needed.*
 3.  **Amount**: Enter `1000` MWK.
 4.  **Currency**: Select `CNY` as destination currency.
@@ -77,7 +89,7 @@ Follow these steps to verify the "Happy Path":
 
 ### Step 3: Verify Receipt
 1.  Logout John.
-2.  Login with **Wei Wang** (`wang.wei@example.com` / `Password123!`).
+2.  Login with **Jane Smith** (`jane.smith@example.com` / `password123`).
 3.  Check the **CNY** wallet. The balance should have increased (amount converted from MWK).
 
 ### Step 4: Admin Approval (For Large Amounts)
@@ -85,7 +97,7 @@ Follow these steps to verify the "Happy Path":
 2.  Send **600,000** MWK (above the 500k threshold).
 3.  The transaction will be **Pending**.
 4.  Open **Admin Portal**: [http://localhost:3016](http://localhost:3016)
-5.  Login with **Admin** (`admin@example.com` / `AdminPassword123`).
+5.  Login with **Admin** (`admin@kyd.com` / `password123`).
 6.  Go to **Transactions**. Find the pending one.
 7.  Click **Approve**.
 8.  Check John's history; it should now be **Completed**.
@@ -121,3 +133,12 @@ This script will:
 
 *   **Database connection failed**: Ensure `postgres` container is healthy (`docker-compose ps`).
 *   **"relation does not exist"**: Run the seeder again to ensure migrations applied.
+
+est Accounts Created **
+
+- Admin User : admin@kyd.com / password123
+- Treasury User : fees@kyd.com / password123
+- Standard Customers :
+  - customer@kyd.com / password123
+  - john.doe@example.com / password123
+  - jane.smith@example.com / password123

@@ -4,6 +4,8 @@ import (
 	"context"
 	"database/sql"
 	"fmt"
+	"log"
+	"strings"
 	"time"
 
 	"kyd/internal/domain"
@@ -41,6 +43,18 @@ func (r *UserRepository) Create(ctx context.Context, user *domain.User) error {
 	if err != nil {
 		return errors.Wrap(err, "failed to encrypt last name")
 	}
+	encPicture, err := r.crypto.Encrypt(user.ProfilePictureURL)
+	if err != nil {
+		return errors.Wrap(err, "failed to encrypt profile picture")
+	}
+	encAccessToken, err := r.crypto.Encrypt(user.ProviderAccessToken)
+	if err != nil {
+		return errors.Wrap(err, "failed to encrypt provider access token")
+	}
+	encRefreshToken, err := r.crypto.Encrypt(user.ProviderRefreshToken)
+	if err != nil {
+		return errors.Wrap(err, "failed to encrypt provider refresh token")
+	}
 	var encTOTPSecret *string
 	if user.TOTPSecret != nil {
 		enc, err := r.crypto.Encrypt(*user.TOTPSecret)
@@ -64,10 +78,12 @@ func (r *UserRepository) Create(ctx context.Context, user *domain.User) error {
 			user_type, kyc_level, kyc_status, country_code, date_of_birth,
 			business_name, risk_score, is_active, created_at, updated_at,
 			email_hash, phone_hash, totp_secret, is_totp_enabled,
-			bio, city, postal_code, tax_id
+			bio, city, postal_code, tax_id, auth_provider, provider_id,
+			profile_picture_url, provider_access_token, provider_refresh_token,
+			email_verified
 		) VALUES (
 			$1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15, $16, $17, $18, $19, $20,
-			$21, $22, $23, $24
+			$21, $22, $23, $24, $25, $26, $27, $28, $29, $30
 		)
 	`
 
@@ -76,7 +92,8 @@ func (r *UserRepository) Create(ctx context.Context, user *domain.User) error {
 		user.UserType, user.KYCLevel, user.KYCStatus, user.CountryCode, user.DateOfBirth,
 		user.BusinessName, user.RiskScore, user.IsActive, user.CreatedAt, user.UpdatedAt,
 		emailHash, phoneHash, encTOTPSecret, user.IsTOTPEnabled,
-		user.Bio, user.City, user.PostalCode, user.TaxID,
+		user.Bio, user.City, user.PostalCode, user.TaxID, user.AuthProvider, user.ProviderID,
+		encPicture, encAccessToken, encRefreshToken, user.EmailVerified,
 	)
 
 	if err != nil {
@@ -87,37 +104,47 @@ func (r *UserRepository) Create(ctx context.Context, user *domain.User) error {
 }
 
 func (r *UserRepository) decryptUser(user *domain.User) error {
-	var err error
 	if user.Email != "" {
-		user.Email, err = r.crypto.Decrypt(user.Email)
-		if err != nil {
-			return errors.Wrap(err, "failed to decrypt email")
+		// Some dev/test seeds/migrations may store plaintext instead of encrypted values.
+		// Treat decrypt failures as "already decrypted" so auth/search still works.
+		if dec, err := r.crypto.Decrypt(user.Email); err == nil {
+			user.Email = dec
 		}
 	}
 	if user.Phone != "" {
-		user.Phone, err = r.crypto.Decrypt(user.Phone)
-		if err != nil {
-			return errors.Wrap(err, "failed to decrypt phone")
+		if dec, err := r.crypto.Decrypt(user.Phone); err == nil {
+			user.Phone = dec
 		}
 	}
 	if user.FirstName != "" {
-		user.FirstName, err = r.crypto.Decrypt(user.FirstName)
-		if err != nil {
-			return errors.Wrap(err, "failed to decrypt first name")
+		if dec, err := r.crypto.Decrypt(user.FirstName); err == nil {
+			user.FirstName = dec
 		}
 	}
 	if user.LastName != "" {
-		user.LastName, err = r.crypto.Decrypt(user.LastName)
-		if err != nil {
-			return errors.Wrap(err, "failed to decrypt last name")
+		if dec, err := r.crypto.Decrypt(user.LastName); err == nil {
+			user.LastName = dec
+		}
+	}
+	if user.ProfilePictureURL != "" {
+		if dec, err := r.crypto.Decrypt(user.ProfilePictureURL); err == nil {
+			user.ProfilePictureURL = dec
+		}
+	}
+	if user.ProviderAccessToken != "" {
+		if dec, err := r.crypto.Decrypt(user.ProviderAccessToken); err == nil {
+			user.ProviderAccessToken = dec
+		}
+	}
+	if user.ProviderRefreshToken != "" {
+		if dec, err := r.crypto.Decrypt(user.ProviderRefreshToken); err == nil {
+			user.ProviderRefreshToken = dec
 		}
 	}
 	if user.TOTPSecret != nil {
-		dec, err := r.crypto.Decrypt(*user.TOTPSecret)
-		if err != nil {
-			return errors.Wrap(err, "failed to decrypt TOTP secret")
+		if dec, err := r.crypto.Decrypt(*user.TOTPSecret); err == nil {
+			user.TOTPSecret = &dec
 		}
-		user.TOTPSecret = &dec
 	}
 	return nil
 }
@@ -131,7 +158,15 @@ func (r *UserRepository) FindByID(ctx context.Context, id uuid.UUID) (*domain.Us
 			business_name, business_registration, risk_score, is_active,
 			email_verified, totp_secret, is_totp_enabled, last_login,
 			failed_login_attempts, locked_until, created_at, updated_at,
-			bio, city, postal_code, tax_id
+			COALESCE(bio, '') as bio,
+			COALESCE(city, '') as city,
+			COALESCE(postal_code, '') as postal_code,
+			COALESCE(tax_id, '') as tax_id,
+			COALESCE(auth_provider, '') as auth_provider,
+			provider_id,
+			COALESCE(profile_picture_url, '') as profile_picture_url,
+			COALESCE(provider_access_token, '') as provider_access_token,
+			COALESCE(provider_refresh_token, '') as provider_refresh_token
 		FROM customer_schema.users WHERE id = $1`
 
 	err := r.db.GetContext(ctx, &user, query, id)
@@ -159,7 +194,12 @@ func (r *UserRepository) FindByIDs(ctx context.Context, ids []uuid.UUID) ([]*dom
 			id, email, phone, first_name, last_name, user_type, kyc_level, kyc_status,
 			country_code, date_of_birth, business_name, risk_score, is_active,
 			failed_login_attempts, locked_until, last_login, created_at, updated_at, is_totp_enabled,
-			bio, city, postal_code, tax_id
+			COALESCE(bio, '') as bio,
+			COALESCE(city, '') as city,
+			COALESCE(postal_code, '') as postal_code,
+			COALESCE(tax_id, '') as tax_id,
+			COALESCE(auth_provider, '') as auth_provider,
+			provider_id
 		FROM customer_schema.users
 		WHERE id IN (?)`, ids)
 	if err != nil {
@@ -192,12 +232,53 @@ func (r *UserRepository) FindByEmail(ctx context.Context, email string) (*domain
 			business_name, business_registration, risk_score, is_active,
 			email_verified, totp_secret, is_totp_enabled, last_login,
 			failed_login_attempts, locked_until, created_at, updated_at,
-			bio, city, postal_code, tax_id
+			bio, city, postal_code, tax_id, auth_provider, provider_id
 		FROM customer_schema.users WHERE email_hash = $1`
 
 	err := r.db.GetContext(ctx, &user, query, emailHash)
 	if err == sql.ErrNoRows {
-		return nil, errors.ErrUserNotFound
+		// Fallback for legacy/dev seeds where email_hash is not populated with
+		// the blind index value (e.g., placeholder values from migrations).
+		queryByEmail := `
+			SELECT
+				id,
+				email,
+				phone,
+				password_hash,
+				first_name,
+				last_name,
+				user_type,
+				kyc_level,
+				kyc_status,
+				is_active,
+				email_verified,
+				totp_secret,
+				is_totp_enabled,
+				last_login,
+				failed_login_attempts,
+				locked_until,
+				updated_at,
+				COALESCE(bio, '') as bio,
+				COALESCE(city, '') as city,
+				COALESCE(postal_code, '') as postal_code,
+				COALESCE(tax_id, '') as tax_id,
+				COALESCE(auth_provider, '') as auth_provider,
+				provider_id
+			FROM customer_schema.users WHERE email = $1`
+
+		if err2 := r.db.GetContext(ctx, &user, queryByEmail, email); err2 == sql.ErrNoRows {
+			log.Printf("[auth] FindByEmail fallback by email: still not found (email=%q)", email)
+			return nil, errors.ErrUserNotFound
+		} else if err2 != nil {
+			log.Printf("[auth] FindByEmail fallback by email: query/scan error (email=%q): %v", email, err2)
+			return nil, errors.Wrap(err2, "failed to find user by email")
+		}
+
+		// decryptUser is tolerant of plaintext vs encrypted values
+		if err := r.decryptUser(&user); err != nil {
+			return nil, err
+		}
+		return &user, nil
 	}
 	if err != nil {
 		return nil, errors.Wrap(err, "failed to find user")
@@ -266,8 +347,9 @@ func (r *UserRepository) Update(ctx context.Context, user *domain.User) error {
 			updated_at = $12, email_hash = $13, phone_hash = $14,
 			totp_secret = $15, is_totp_enabled = $16,
 			bio = $17, city = $18, postal_code = $19, tax_id = $20,
-			is_active = $21
-		WHERE id = $22
+			is_active = $21, auth_provider = $22, provider_id = $23,
+			email_verified = $24
+		WHERE id = $25
 	`
 
 	_, err = r.db.ExecContext(ctx, query,
@@ -276,7 +358,8 @@ func (r *UserRepository) Update(ctx context.Context, user *domain.User) error {
 		user.PasswordHash, user.FailedLoginAttempts, user.LockedUntil,
 		user.UpdatedAt, emailHash, phoneHash, encTOTPSecret, user.IsTOTPEnabled,
 		user.Bio, user.City, user.PostalCode, user.TaxID,
-		user.IsActive,
+		user.IsActive, user.AuthProvider, user.ProviderID,
+		user.EmailVerified,
 		user.ID,
 	)
 
@@ -313,7 +396,7 @@ func (r *UserRepository) FindAll(ctx context.Context, limit, offset int, userTyp
 			id, email, phone, first_name, last_name, user_type, kyc_level, kyc_status,
 			country_code, date_of_birth, business_name, risk_score, is_active,
 			failed_login_attempts, locked_until, last_login, created_at, updated_at,
-			bio, city, postal_code, tax_id
+			bio, city, postal_code, tax_id, auth_provider, provider_id
 		FROM customer_schema.users
 	`
 	args := []interface{}{}
@@ -347,6 +430,80 @@ func (r *UserRepository) CountAll(ctx context.Context, userType string) (int, er
 	}
 	err := r.db.GetContext(ctx, &count, query, args...)
 	return count, errors.Wrap(err, "failed to count users")
+}
+
+func (r *UserRepository) FindAllWithFilters(ctx context.Context, limit, offset int, userType string, kycStatus string) ([]*domain.User, error) {
+	var users []*domain.User
+
+	query := `
+		SELECT 
+			id, email, phone, first_name, last_name, user_type, kyc_level, kyc_status,
+			country_code, date_of_birth, business_name, risk_score, is_active,
+			failed_login_attempts, locked_until, last_login, created_at, updated_at,
+			bio, city, postal_code, tax_id, auth_provider, provider_id
+		FROM customer_schema.users
+	`
+
+	var (
+		clauses []string
+		args    []interface{}
+	)
+
+	if strings.TrimSpace(userType) != "" {
+		args = append(args, strings.TrimSpace(userType))
+		clauses = append(clauses, fmt.Sprintf("user_type = $%d", len(args)))
+	}
+	if strings.TrimSpace(kycStatus) != "" {
+		args = append(args, strings.TrimSpace(kycStatus))
+		clauses = append(clauses, fmt.Sprintf("kyc_status = $%d", len(args)))
+	}
+
+	if len(clauses) > 0 {
+		query += " WHERE " + strings.Join(clauses, " AND ")
+	}
+
+	query += ` ORDER BY created_at DESC LIMIT $` + fmt.Sprint(len(args)+1) + ` OFFSET $` + fmt.Sprint(len(args)+2)
+	args = append(args, limit, offset)
+
+	err := r.db.SelectContext(ctx, &users, query, args...)
+	if err != nil {
+		return nil, errors.Wrap(err, "failed to find users")
+	}
+
+	for _, user := range users {
+		if err := r.decryptUser(user); err != nil {
+			return nil, err
+		}
+	}
+	return users, nil
+}
+
+func (r *UserRepository) CountAllWithFilters(ctx context.Context, userType string, kycStatus string) (int, error) {
+	var total int
+	query := `SELECT COUNT(*) FROM customer_schema.users`
+
+	var (
+		clauses []string
+		args    []interface{}
+	)
+
+	if strings.TrimSpace(userType) != "" {
+		args = append(args, strings.TrimSpace(userType))
+		clauses = append(clauses, fmt.Sprintf("user_type = $%d", len(args)))
+	}
+	if strings.TrimSpace(kycStatus) != "" {
+		args = append(args, strings.TrimSpace(kycStatus))
+		clauses = append(clauses, fmt.Sprintf("kyc_status = $%d", len(args)))
+	}
+	if len(clauses) > 0 {
+		query += " WHERE " + strings.Join(clauses, " AND ")
+	}
+
+	err := r.db.GetContext(ctx, &total, query, args...)
+	if err != nil {
+		return 0, errors.Wrap(err, "failed to count users")
+	}
+	return total, nil
 }
 
 func (r *UserRepository) FindAllByKYCStatus(ctx context.Context, status string, limit, offset int) ([]*domain.User, error) {

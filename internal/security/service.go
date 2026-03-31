@@ -9,8 +9,17 @@ import (
 	"github.com/google/uuid"
 )
 
+type EventFilter struct {
+	Type      *string
+	Severity  *string
+	Status    *string
+	UserID    *uuid.UUID
+	IPAddress *string
+	Query     *string
+}
+
 type Repository interface {
-	GetSecurityEvents(ctx context.Context, limit, offset int) ([]domain.SecurityEvent, int, error)
+	GetSecurityEvents(ctx context.Context, filter *EventFilter, limit, offset int) ([]domain.SecurityEvent, int, error)
 	LogSecurityEvent(ctx context.Context, event *domain.SecurityEvent) error
 	GetBlocklist(ctx context.Context) ([]domain.BlocklistEntry, error)
 	AddToBlocklist(ctx context.Context, entry *domain.BlocklistEntry) error
@@ -29,8 +38,8 @@ func NewService(repo Repository) *Service {
 	return &Service{repo: repo}
 }
 
-func (s *Service) GetSecurityEvents(ctx context.Context, limit, offset int) ([]domain.SecurityEvent, int, error) {
-	return s.repo.GetSecurityEvents(ctx, limit, offset)
+func (s *Service) GetSecurityEvents(ctx context.Context, filter *EventFilter, limit, offset int) ([]domain.SecurityEvent, int, error) {
+	return s.repo.GetSecurityEvents(ctx, filter, limit, offset)
 }
 
 func (s *Service) LogSecurityEvent(ctx context.Context, event *domain.SecurityEvent) error {

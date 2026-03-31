@@ -45,6 +45,32 @@ func (m *MockRepository) FindSubmitted(ctx context.Context) ([]*domain.Settlemen
 	return args.Get(0).([]*domain.Settlement), args.Error(1)
 }
 
+func (m *MockRepository) FindAll(ctx context.Context, limit, offset int) ([]*domain.Settlement, error) {
+	args := m.Called(ctx, limit, offset)
+	if args.Get(0) == nil {
+		return nil, args.Error(1)
+	}
+	return args.Get(0).([]*domain.Settlement), args.Error(1)
+}
+
+func (m *MockRepository) CountAll(ctx context.Context) (int, error) {
+	args := m.Called(ctx)
+	return args.Int(0), args.Error(1)
+}
+
+func (m *MockRepository) FindAllWithFilters(ctx context.Context, limit, offset int, status string, currency string, network string) ([]*domain.Settlement, error) {
+	args := m.Called(ctx, limit, offset, status, currency, network)
+	if args.Get(0) == nil {
+		return nil, args.Error(1)
+	}
+	return args.Get(0).([]*domain.Settlement), args.Error(1)
+}
+
+func (m *MockRepository) CountAllWithFilters(ctx context.Context, status string, currency string, network string) (int, error) {
+	args := m.Called(ctx, status, currency, network)
+	return args.Int(0), args.Error(1)
+}
+
 type MockTransactionRepository struct {
 	mock.Mock
 }

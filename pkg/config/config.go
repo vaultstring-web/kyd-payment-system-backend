@@ -11,18 +11,36 @@ import (
 )
 
 type Config struct {
-	Server       ServerConfig
-	Database     DatabaseConfig
-	Redis        RedisConfig
-	JWT          JWTConfig
-	TOTP         TOTPConfig
-	Stellar      StellarConfig
-	Ripple       RippleConfig
-	Email        EmailConfig
-	Verification VerificationConfig
-	Security     SecurityConfig
-	Risk         RiskConfig
-	Compliance   ComplianceConfig
+	Server        ServerConfig
+	Database      DatabaseConfig
+	Redis         RedisConfig
+	JWT           JWTConfig
+	TOTP          TOTPConfig
+	Stellar       StellarConfig
+	Ripple        RippleConfig
+	Email         EmailConfig
+	Verification  VerificationConfig
+	PasswordReset PasswordResetConfig
+	Google        GoogleConfig
+	Security      SecurityConfig
+	Risk          RiskConfig
+	Compliance    ComplianceConfig
+}
+
+type PasswordResetConfig struct {
+	BaseURL         string
+	TokenExpiration time.Duration
+}
+
+type GoogleConfig struct {
+	ClientID           string
+	ClientSecret       string
+	RedirectURI        string
+	TokenIssuer        string
+	MockMode           bool
+	APIKey             string // For Maps or other services
+	ProjectID          string // GCP Project ID
+	ServiceAccountPath string // Path to service account JSON
 }
 
 type RiskConfig struct {
@@ -85,6 +103,7 @@ type StellarConfig struct {
 	NetworkURL    string
 	IssuerAccount string
 	SecretKey     string
+	Simulation    bool // When true, use simulator; when false, use real Stellar network
 }
 
 type RippleConfig struct {
@@ -100,11 +119,17 @@ type EmailConfig struct {
 	SMTPPassword string
 	SMTPFrom     string
 	SMTPUseTLS   bool
+
+	// Gmail API configuration
+	GmailAPIEnabled      bool
+	GmailCredentialsPath string
+	GmailTokenPath       string
 }
 
 type VerificationConfig struct {
-	BaseURL         string
-	TokenExpiration time.Duration
+	BaseURL                 string
+	TokenExpiration         time.Duration
+	BypassEmailVerification bool
 }
 
 type SecurityConfig struct {
@@ -164,21 +189,40 @@ func Load() *Config {
 			Digits: getIntEnv("TOTP_DIGITS", 6),
 		},
 		Email: EmailConfig{
-			SMTPHost:     getEnv("SMTP_HOST", "smtp.gmail.com"),
-			SMTPPort:     getIntEnv("SMTP_PORT", 587),
-			SMTPUsername: getEnv("SMTP_USERNAME", ""),
-			SMTPPassword: getEnv("SMTP_PASSWORD", ""),
-			SMTPFrom:     getEnv("SMTP_FROM", ""),
-			SMTPUseTLS:   getBoolEnv("SMTP_USE_TLS", true),
+			SMTPHost:             getEnv("SMTP_HOST", "smtp.gmail.com"),
+			SMTPPort:             getIntEnv("SMTP_PORT", 587),
+			SMTPUsername:         getEnv("SMTP_USERNAME", ""),
+			SMTPPassword:         getEnv("SMTP_PASSWORD", ""),
+			SMTPFrom:             getEnv("SMTP_FROM", ""),
+			SMTPUseTLS:           getBoolEnv("SMTP_USE_TLS", true),
+			GmailAPIEnabled:      getBoolEnv("GMAIL_API_ENABLED", false),
+			GmailCredentialsPath: getEnv("GMAIL_CREDENTIALS_PATH", ""),
+			GmailTokenPath:       getEnv("GMAIL_TOKEN_PATH", ""),
 		},
 		Verification: VerificationConfig{
-			BaseURL:         getEnv("VERIFICATION_BASE_URL", "http://localhost:9000/api/v1/auth/verify"),
-			TokenExpiration: getDurationEnv("EMAIL_VERIFICATION_EXPIRATION", 24*time.Hour),
+			BaseURL:                 getEnv("VERIFICATION_BASE_URL", "http://localhost:3012/verify-email"),
+			TokenExpiration:         getDurationEnv("VERIFICATION_TOKEN_EXPIRATION", 24*time.Hour),
+			BypassEmailVerification: getBoolEnv("BYPASS_EMAIL_VERIFICATION", false),
+		},
+		PasswordReset: PasswordResetConfig{
+			BaseURL:         getEnv("PASSWORD_RESET_BASE_URL", "http://localhost:9000/api/v1/auth/reset-password"),
+			TokenExpiration: getDurationEnv("PASSWORD_RESET_EXPIRATION", 1*time.Hour),
+		},
+		Google: GoogleConfig{
+			ClientID:           getEnv("GOOGLE_CLIENT_ID", ""),
+			ClientSecret:       getEnv("GOOGLE_CLIENT_SECRET", ""),
+			RedirectURI:        getEnv("GOOGLE_REDIRECT_URI", ""),
+			TokenIssuer:        getEnv("GOOGLE_TOKEN_ISSUER", "https://accounts.google.com"),
+			MockMode:           getBoolEnv("GOOGLE_MOCK_MODE", false),
+			APIKey:             getEnv("GOOGLE_API_KEY", ""),
+			ProjectID:          getEnv("GOOGLE_PROJECT_ID", ""),
+			ServiceAccountPath: getEnv("GOOGLE_SERVICE_ACCOUNT_PATH", ""),
 		},
 		Stellar: StellarConfig{
 			NetworkURL:    getEnv("STELLAR_NETWORK_URL", "https://horizon-testnet.stellar.org"),
 			IssuerAccount: getEnv("STELLAR_ISSUER_ACCOUNT", ""),
 			SecretKey:     getEnv("STELLAR_SECRET_KEY", ""),
+			Simulation:    getBoolEnv("STELLAR_SIMULATION", true), // Default true for local; set false for production
 		},
 		Ripple: RippleConfig{
 			ServerURL:     getEnv("RIPPLE_SERVER_URL", "wss://s.altnet.rippletest.net:51233"),

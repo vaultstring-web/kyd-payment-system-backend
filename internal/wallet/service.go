@@ -8,6 +8,7 @@ import (
 	"crypto/rand"
 	"fmt"
 	"math/big"
+	"strconv"
 	"time"
 
 	"kyd/internal/domain"
@@ -179,12 +180,22 @@ func (s *Service) CreateWallet(ctx context.Context, req *CreateWalletRequest) (*
 }
 
 func (s *Service) GetAllWallets(ctx context.Context, limit, offset int) ([]*BalanceResponse, int, error) {
-	wallets, err := s.repo.FindAll(ctx, limit, offset)
-	if err != nil {
-		return nil, 0, err
+	return s.GetWalletsWithFilter(ctx, limit, offset, nil)
+}
+
+func (s *Service) GetWalletsWithFilter(ctx context.Context, limit, offset int, userID *uuid.UUID) ([]*BalanceResponse, int, error) {
+	var wallets []*domain.Wallet
+	var total int
+	var err error
+
+	if userID != nil {
+		wallets, err = s.repo.FindAllWithFilter(ctx, limit, offset, userID)
+		total, _ = s.repo.CountWithFilter(ctx, userID)
+	} else {
+		wallets, err = s.repo.FindAll(ctx, limit, offset)
+		total, _ = s.repo.Count(ctx)
 	}
 
-	total, err := s.repo.Count(ctx)
 	if err != nil {
 		return nil, 0, err
 	}
@@ -193,7 +204,6 @@ func (s *Service) GetAllWallets(ctx context.Context, limit, offset int) ([]*Bala
 	for _, wallet := range wallets {
 		user, err := s.userRepo.FindByID(ctx, wallet.UserID)
 		if err != nil {
-			// Skip wallet if user not found (integrity issue, but shouldn't block list)
 			s.logger.Error("User not found for wallet", map[string]interface{}{"wallet_id": wallet.ID, "user_id": wallet.UserID})
 			continue
 		}
@@ -225,6 +235,44 @@ func (s *Service) GetAllWallets(ctx context.Context, limit, offset int) ([]*Bala
 	}
 
 	return responses, total, nil
+}
+
+func (s *Service) FixWalletAddresses(ctx context.Context) (int, error) {
+	wallets, err := s.repo.FindAll(ctx, 10000, 0)
+	if err != nil {
+		return 0, err
+	}
+
+	count := 0
+	for _, w := range wallets {
+		addr := ""
+		if w.WalletAddress != nil {
+			addr = *w.WalletAddress
+		}
+
+		// Check if address is valid 16-digit number
+		isValid := false
+		if len(addr) == 16 {
+			_, err := strconv.ParseInt(addr, 10, 64)
+			if err == nil {
+				isValid = true
+			}
+		}
+
+		if !isValid {
+			newAddr, err := s.generateWalletNumber()
+			if err != nil {
+				continue
+			}
+
+			w.WalletAddress = &newAddr
+			w.UpdatedAt = time.Now()
+			if err := s.repo.Update(ctx, w); err == nil {
+				count++
+			}
+		}
+	}
+	return count, nil
 }
 
 func (s *Service) GetWallet(ctx context.Context, id uuid.UUID) (*domain.Wallet, error) {
@@ -459,7 +507,9 @@ type Repository interface {
 	Update(ctx context.Context, wallet *domain.Wallet) error
 	FindByID(ctx context.Context, id uuid.UUID) (*domain.Wallet, error)
 	FindAll(ctx context.Context, limit, offset int) ([]*domain.Wallet, error)
+	FindAllWithFilter(ctx context.Context, limit, offset int, userID *uuid.UUID) ([]*domain.Wallet, error)
 	Count(ctx context.Context) (int, error)
+	CountWithFilter(ctx context.Context, userID *uuid.UUID) (int, error)
 	FindByUserID(ctx context.Context, userID uuid.UUID) ([]*domain.Wallet, error)
 	FindByUserAndCurrency(ctx context.Context, userID uuid.UUID, currency domain.Currency) (*domain.Wallet, error)
 	FindByAddress(ctx context.Context, address string) (*domain.Wallet, error)

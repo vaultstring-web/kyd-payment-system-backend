@@ -36,11 +36,18 @@ import (
 
 type userStatusChecker struct {
 	repo *postgres.UserRepository
+	log  logger.Logger
 }
 
 func (c *userStatusChecker) IsUserActive(ctx context.Context, id uuid.UUID) (bool, error) {
 	u, err := c.repo.FindByID(ctx, id)
 	if err != nil {
+		if c.log != nil {
+			c.log.Error("IsUserActive: FindByID failed", map[string]interface{}{
+				"user_id": id.String(),
+				"error":   err.Error(),
+			})
+		}
 		return false, err
 	}
 	return u.IsActive, nil
@@ -141,16 +148,42 @@ func main() {
 	// Initialize services
 	authService := auth.NewService(userRepo, blacklist, cfg.JWT.Secret, cfg.JWT.Expiration).WithAdditionalJWTSecrets(cfg.JWT.OldSecrets)
 	securityService := security.NewService(securityRepo)
-	// Configure email verification
-	m := mailer.New(mailer.Config{
-		Host:     cfg.Email.SMTPHost,
-		Port:     cfg.Email.SMTPPort,
-		Username: cfg.Email.SMTPUsername,
-		Password: cfg.Email.SMTPPassword,
-		From:     cfg.Email.SMTPFrom,
-		UseTLS:   cfg.Email.SMTPUseTLS,
+
+	// Configure email verification and password reset
+	m, err := mailer.New(mailer.Config{
+		Host:                 cfg.Email.SMTPHost,
+		Port:                 cfg.Email.SMTPPort,
+		Username:             cfg.Email.SMTPUsername,
+		Password:             cfg.Email.SMTPPassword,
+		From:                 cfg.Email.SMTPFrom,
+		UseTLS:               cfg.Email.SMTPUseTLS,
+		GmailAPIEnabled:      cfg.Email.GmailAPIEnabled,
+		GmailCredentialsPath: cfg.Email.GmailCredentialsPath,
+		GmailTokenPath:       cfg.Email.GmailTokenPath,
 	})
-	authService = authService.WithEmailVerification(m, cfg.Verification.BaseURL, cfg.Verification.TokenExpiration)
+	if err != nil {
+		log.Fatal("Failed to initialize mailer", map[string]interface{}{"error": err.Error()})
+	}
+
+	authService = authService.WithEmailVerification(m, cfg.Verification.BaseURL, cfg.Verification.TokenExpiration, cfg.Verification.BypassEmailVerification)
+	authService = authService.WithPasswordReset(cfg.PasswordReset.BaseURL, cfg.PasswordReset.TokenExpiration)
+
+	// Initialize Google OAuth Service
+	if cfg.Google.MockMode || (cfg.Google.ClientID != "" && cfg.Google.ClientSecret != "") {
+		googleOAuthConfig := &auth.GoogleOAuthConfig{
+			ClientID:     cfg.Google.ClientID,
+			ClientSecret: cfg.Google.ClientSecret,
+			RedirectURI:  cfg.Google.RedirectURI,
+			TokenIssuer:  cfg.Google.TokenIssuer,
+			MockMode:     cfg.Google.MockMode,
+		}
+		googleOAuthService, err := auth.NewGoogleOAuthService(googleOAuthConfig, authService)
+		if err != nil {
+			log.Error("Failed to initialize Google OAuth Service", map[string]interface{}{"error": err.Error()})
+		} else {
+			authService = authService.WithGoogleOAuth(googleOAuthService)
+		}
+	}
 
 	// Initialize handlers
 	val := validator.New()
@@ -160,7 +193,7 @@ func main() {
 	}
 	cookieSecure := envBool("COOKIE_SECURE", env != "local")
 	authHandler := handler.NewAuthHandler(authService, val, log, auditRepo, securityService, cfg.TOTP.Issuer, cfg.TOTP.Period, cfg.TOTP.Digits, cookieSecure)
-	usersHandler := handler.NewUsersHandler(authService, val, log)
+	usersHandler := handler.NewUsersHandler(authService, val, log, auditRepo, nil, nil, nil)
 	enableRateLimiter := envBool("AUTH_RATE_LIMIT_ENABLED", env != "local")
 
 	// Setup router
@@ -171,7 +204,9 @@ func main() {
 	r.Use(middleware.CorrelationID)
 	r.Use(middleware.NewLoggingMiddleware(log).Log)
 	if enableRateLimiter {
-		r.Use(middleware.NewRateLimiter(redisClient, 60, time.Minute).WithAdaptive(5, 15*time.Minute).Limit)
+		// Secure auth rate limit: max 5 attempts per 15 minutes
+		rl := middleware.NewRateLimiter(redisClient, 5, 15*time.Minute).WithAdaptive(3, 30*time.Minute)
+		r.Use(rl.Limit)
 	}
 	r.Use(middleware.SecurityHeaders)
 	r.Use(middleware.Recovery)
@@ -179,18 +214,29 @@ func main() {
 
 	// Routes
 	r.HandleFunc("/health", healthCheck).Methods("GET")
+	r.HandleFunc("/api/v1/auth/health", healthCheck).Methods("GET")
 	r.HandleFunc("/api/v1/auth/register", authHandler.Register).Methods("POST")
 	r.HandleFunc("/api/v1/auth/login", authHandler.Login).Methods("POST")
 	r.HandleFunc("/api/v1/auth/logout", authHandler.Logout).Methods("POST")
 	r.HandleFunc("/api/v1/auth/send-verification", authHandler.SendVerification).Methods("POST")
+	r.HandleFunc("/api/v1/auth/verify/resend", authHandler.SendVerification).Methods("POST")
 	r.HandleFunc("/api/v1/auth/verify", authHandler.VerifyEmail).Methods("POST", "GET")
+	r.HandleFunc("/api/v1/auth/forgot-password", authHandler.ForgotPassword).Methods("POST")
+	r.HandleFunc("/api/v1/auth/reset-password", authHandler.ResetPassword).Methods("POST")
+
+	// Google OAuth routes
+	r.HandleFunc("/api/v1/auth/google/start", authHandler.GoogleAuthStart).Methods("GET")
+	r.HandleFunc("/api/v1/auth/google/callback", authHandler.GoogleAuthCallback).Methods("POST")
+	r.HandleFunc("/api/v1/auth/google/mock-login", authHandler.GoogleMockLogin).Methods("GET")
+
 	r.HandleFunc("/api/v1/auth/debug", authHandler.DebugUser).Methods("GET")
 
 	// Protected routes
-	authMW := middleware.NewAuthMiddlewareWithUserStatus(cfg.JWT.Secret, blacklist, &userStatusChecker{repo: userRepo})
+	authMW := middleware.NewAuthMiddlewareWithUserStatus(cfg.JWT.Secret, blacklist, &userStatusChecker{repo: userRepo, log: log})
 	auditMW := middleware.NewAuditMiddleware(auditRepo, log)
 
 	api := r.PathPrefix("/api/v1").Subrouter()
+	api.HandleFunc("/auth/health", healthCheck).Methods("GET")
 	api.Use(auditMW.Audit)
 	api.Use(authMW.Authenticate)
 	api.HandleFunc("/auth/me", authHandler.Me).Methods("GET")
@@ -204,6 +250,8 @@ func main() {
 	api.HandleFunc("/auth/users", usersHandler.List).Methods("GET")
 	api.HandleFunc("/auth/users/{id}", usersHandler.Get).Methods("GET")
 	api.HandleFunc("/auth/users/{id}", usersHandler.Update).Methods("PUT")
+	api.HandleFunc("/auth/users/{id}/block", usersHandler.BlockUser).Methods("POST")
+	api.HandleFunc("/auth/users/{id}/unblock", usersHandler.UnblockUser).Methods("POST")
 
 	// Start server
 	srv := &http.Server{

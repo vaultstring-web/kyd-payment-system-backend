@@ -95,55 +95,43 @@ func (m *AuthMiddleware) Authenticate(next http.Handler) http.Handler {
 		})
 
 		if err != nil || !token.Valid {
-			fmt.Printf("AuthMiddleware: Invalid token: %v\n", err)
 			respondJSONError(w, http.StatusUnauthorized, "Invalid token")
 			return
 		}
 
 		claims, ok := token.Claims.(jwt.MapClaims)
 		if !ok {
-			fmt.Printf("AuthMiddleware: Failed to parse token claims\n")
 			respondJSONError(w, http.StatusUnauthorized, "Invalid token claims")
 			return
 		}
 
 		userIDStr, ok := claims["user_id"].(string)
 		if !ok {
-			fmt.Printf("AuthMiddleware: user_id claim missing or not string: %v\n", claims["user_id"])
 			respondJSONError(w, http.StatusUnauthorized, "Invalid user ID in token")
 			return
 		}
 
-		fmt.Printf("AuthMiddleware: Extracted user_id from token: %s\n", userIDStr)
-
 		userID, err := uuid.Parse(userIDStr)
 		if err != nil {
-			fmt.Printf("AuthMiddleware: Failed to parse user_id as UUID: %s, error: %v\n", userIDStr, err)
 			respondJSONError(w, http.StatusUnauthorized, "Invalid user ID format")
 			return
 		}
 
-		fmt.Printf("AuthMiddleware: Successfully parsed user ID: %s\n", userID.String())
-
 		if m.statusChecker != nil {
 			active, err := m.statusChecker.IsUserActive(r.Context(), userID)
 			if err != nil {
-				fmt.Printf("AuthMiddleware: Failed to check user status: %v\n", err)
 				respondJSONError(w, http.StatusInternalServerError, "Failed to verify account status")
 				return
 			}
 			if !active {
-				fmt.Printf("AuthMiddleware: User account is not active: %s\n", userID.String())
 				respondJSONError(w, http.StatusForbidden, "Account is blocked")
 				return
 			}
 		}
 
 		ctx := context.WithValue(r.Context(), ctxUserIDKey, userID)
-		fmt.Printf("AuthMiddleware: Injected user ID into context: %s\n", userID.String())
 		if email, ok := claims["email"].(string); ok {
 			ctx = context.WithValue(ctx, ctxEmailKey, email)
-			fmt.Printf("AuthMiddleware: Injected email into context: %s\n", email)
 		}
 		if utRaw, ok := claims["user_type"]; ok {
 			ctx = context.WithValue(ctx, ctxUserTypeKey, fmt.Sprintf("%v", utRaw))
@@ -183,7 +171,8 @@ func CORS(next http.Handler) http.Handler {
 		}
 
 		w.Header().Set("Access-Control-Allow-Methods", "GET, POST, PUT, DELETE, OPTIONS")
-		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Correlation-ID")
+		w.Header().Set("Access-Control-Allow-Headers", "Content-Type, Authorization, X-Correlation-ID, X-CSRF-Token, Idempotency-Key, X-Device-ID")
+		w.Header().Set("Access-Control-Allow-Credentials", "true")
 		w.Header().Set("Access-Control-Max-Age", "3600")
 
 		if r.Method == "OPTIONS" {

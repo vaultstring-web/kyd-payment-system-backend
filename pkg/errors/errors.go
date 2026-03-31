@@ -20,6 +20,8 @@ var (
 	ErrSettlementNotFound       = errors.New("settlement not found")
 	ErrRateNotAvailable         = errors.New("exchange rate not available")
 	ErrCurrencyNotAllowed       = errors.New("currency not allowed for user country")
+	ErrTOTPRequired             = errors.New("mfa required")
+	ErrInvalidTOTP              = errors.New("invalid mfa code")
 )
 
 // New returns a new error with the given text

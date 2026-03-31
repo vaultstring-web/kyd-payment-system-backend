@@ -3,10 +3,13 @@ package handler
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"strings"
 	"time"
 
@@ -20,6 +23,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/pquerna/otp/totp"
+	"golang.org/x/oauth2"
 )
 
 // AuditLogger defines the interface for persisting audit logs.
@@ -68,6 +72,17 @@ func (h *AuthHandler) Register(w http.ResponseWriter, r *http.Request) {
 			h.respondError(w, http.StatusBadRequest, "Request body is required")
 			return
 		}
+		// #region agent log
+		h.logger.Error("Login decode failed", map[string]interface{}{
+			"event":        "login_decode_failed",
+			"decoder_error": err.Error(),
+			"content_type": r.Header.Get("Content-Type"),
+			"content_length": r.ContentLength,
+			"content_encoding": r.Header.Get("Content-Encoding"),
+			"path":          r.URL.Path,
+			"method":        r.Method,
+		})
+		// #endregion
 		h.respondError(w, http.StatusBadRequest, "Invalid request body")
 		return
 	}
@@ -353,6 +368,185 @@ func (h *AuthHandler) Me(w http.ResponseWriter, r *http.Request) {
 	h.respondJSON(w, http.StatusOK, user)
 }
 
+// GoogleAuthRequest represents a Google OAuth authentication request
+type GoogleAuthRequest struct {
+	Code    string `json:"code"`     // Authorization code from Google
+	IDToken string `json:"id_token"` // ID token from Google (alternative to code)
+	State   string `json:"state"`    // State parameter for CSRF protection
+}
+
+// GoogleAuthStart initiates Google OAuth flow by returning the auth URL
+func (h *AuthHandler) GoogleAuthStart(w http.ResponseWriter, r *http.Request) {
+	if h.service.GoogleOAuth == nil {
+		h.respondError(w, http.StatusNotImplemented, "Google OAuth is not configured")
+		return
+	}
+
+	// Generate state parameter for CSRF protection
+	state, err := generateRandomToken(32)
+	if err != nil {
+		h.logger.Error("Failed to generate state token", map[string]interface{}{
+			"error": err.Error(),
+			"ip":    r.RemoteAddr,
+		})
+		h.respondError(w, http.StatusInternalServerError, "Internal server error")
+		return
+	}
+
+	// Store state in session or cookie for validation later
+	// For now, we'll return it to the client to include in the redirect
+	authURL := h.service.GoogleOAuth.GetAuthURL(state)
+
+	h.respondJSON(w, http.StatusOK, map[string]interface{}{
+		"auth_url": authURL,
+		"state":    state,
+	})
+}
+
+// GoogleAuthCallback handles the Google OAuth callback and exchanges code for tokens
+func (h *AuthHandler) GoogleAuthCallback(w http.ResponseWriter, r *http.Request) {
+	if h.service.GoogleOAuth == nil {
+		h.respondError(w, http.StatusNotImplemented, "Google OAuth is not configured")
+		return
+	}
+
+	var req GoogleAuthRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		h.respondError(w, http.StatusBadRequest, "Invalid request body")
+		return
+	}
+
+	if req.Code == "" && req.IDToken == "" {
+		h.respondError(w, http.StatusBadRequest, "Either code or id_token is required")
+		return
+	}
+
+	var userInfo *auth.GoogleUserInfo
+	var googleToken *oauth2.Token
+	var err error
+
+	if req.Code != "" {
+		// Exchange authorization code for tokens and user info
+		userInfo, googleToken, err = h.service.GoogleOAuth.ExchangeCode(r.Context(), req.Code)
+	} else {
+		// Validate ID token directly
+		userInfo, err = h.service.GoogleOAuth.ValidateIDToken(r.Context(), req.IDToken)
+		// For ID token auth, we don't have a full oauth2.Token unless passed in req
+	}
+
+	if err != nil {
+		h.logger.Error("Google OAuth authentication failed", map[string]interface{}{
+			"error": err.Error(),
+			"ip":    r.RemoteAddr,
+		})
+		h.respondError(w, http.StatusUnauthorized, "Google authentication failed: "+err.Error())
+		return
+	}
+
+	// Handle Google sign-in (creates user if doesn't exist, logs in if exists)
+	tokenResponse, err := h.service.GoogleOAuth.HandleGoogleSignIn(r.Context(), userInfo, googleToken)
+	if err != nil {
+		h.logger.Error("Google sign-in failed", map[string]interface{}{
+			"error": err.Error(),
+			"email": userInfo.Email,
+			"ip":    r.RemoteAddr,
+		})
+		h.respondError(w, http.StatusInternalServerError, "Failed to complete sign-in: "+err.Error())
+		return
+	}
+
+	h.logger.Info("Google OAuth login successful", map[string]interface{}{
+		"event":   "google_oauth_login",
+		"user_id": tokenResponse.User.ID.String(),
+		"email":   userInfo.Email,
+		"ip":      r.RemoteAddr,
+	})
+
+	// Audit log
+	_ = h.auditLogger.Create(r.Context(), &domain.AuditLog{
+		ID:        uuid.New(),
+		UserID:    &tokenResponse.User.ID,
+		Action:    "LOGIN_GOOGLE",
+		Status:    "SUCCESS",
+		IPAddress: r.RemoteAddr,
+		UserAgent: r.UserAgent(),
+		CreatedAt: time.Now(),
+	})
+
+	// Set authentication cookies
+	h.setAuthCookies(w, tokenResponse)
+
+	// Return token response
+	h.respondJSON(w, http.StatusOK, tokenResponse)
+}
+
+// GoogleMockLogin simulates a Google login for development/testing
+func (h *AuthHandler) GoogleMockLogin(w http.ResponseWriter, r *http.Request) {
+	state := r.URL.Query().Get("state")
+	if state == "" {
+		h.respondError(w, http.StatusBadRequest, "Missing state parameter")
+		return
+	}
+
+	// For mock login, we redirect back to the frontend with a mock code
+	// or directly to the callback if we want to skip the redirect
+	frontendURL := os.Getenv("FRONTEND_URL")
+	if frontendURL == "" {
+		frontendURL = "http://localhost:3012"
+	}
+
+	// Create a mock user info
+	mockUserInfo := &auth.GoogleUserInfo{
+		ID:            "mock-google-id-" + uuid.NewString()[:8],
+		Email:         "mock.user@example.com",
+		VerifiedEmail: true,
+		Name:          "Mock Google User",
+		GivenName:     "Mock",
+		FamilyName:    "User",
+		Picture:       "https://ui-avatars.com/api/?name=Mock+User",
+		Locale:        "en",
+	}
+
+	// In a real flow, this would be a redirect. For simplicity in mock,
+	// we just handle the sign-in directly and redirect to dashboard.
+	mockToken := &oauth2.Token{
+		AccessToken:  "mock-access-token",
+		RefreshToken: "mock-refresh-token",
+		Expiry:       time.Now().Add(1 * time.Hour),
+	}
+	tokenResponse, err := h.service.GoogleOAuth.HandleGoogleSignIn(r.Context(), mockUserInfo, mockToken)
+	if err != nil {
+		h.respondError(w, http.StatusInternalServerError, "Failed to complete mock sign-in: "+err.Error())
+		return
+	}
+
+	// Set authentication cookies
+	h.setAuthCookies(w, tokenResponse)
+
+	// Audit log
+	_ = h.auditLogger.Create(r.Context(), &domain.AuditLog{
+		ID:        uuid.New(),
+		UserID:    &tokenResponse.User.ID,
+		Action:    "LOGIN_GOOGLE_MOCK",
+		Status:    "SUCCESS",
+		IPAddress: r.RemoteAddr,
+		UserAgent: r.UserAgent(),
+		CreatedAt: time.Now(),
+	})
+
+	// Redirect to frontend callback with mock code
+	http.Redirect(w, r, frontendURL+"/google-callback?code=mock-code&state="+state, http.StatusFound)
+}
+
+// generateRandomToken generates a cryptographically secure random token
+func generateRandomToken(length int) (string, error) {
+	b := make([]byte, length)
+	if _, err := rand.Read(b); err != nil {
+		return "", err
+	}
+	return base64.URLEncoding.EncodeToString(b), nil
+}
+
 // SendVerification triggers an email verification email to the given address.
 type sendVerificationRequest struct {
 	Email string `json:"email" validate:"required,email"`
@@ -411,6 +605,10 @@ func (h *AuthHandler) VerifyEmail(w http.ResponseWriter, r *http.Request) {
 	}
 
 	if err := h.service.VerifyEmail(r.Context(), code); err != nil {
+		h.logger.Error("Email verification failed", map[string]interface{}{
+			"error": err.Error(),
+			"ip":    r.RemoteAddr,
+		})
 		h.respondError(w, http.StatusBadRequest, "Verification failed: "+err.Error())
 		return
 	}
@@ -421,6 +619,66 @@ func (h *AuthHandler) VerifyEmail(w http.ResponseWriter, r *http.Request) {
 	})
 
 	h.respondJSON(w, http.StatusOK, map[string]string{"status": "email verified"})
+}
+
+// ForgotPasswordRequest captures the email for password reset request.
+type ForgotPasswordRequest struct {
+	Email string `json:"email" validate:"required,email"`
+}
+
+// ForgotPassword handles the initial request for a password reset.
+func (h *AuthHandler) ForgotPassword(w http.ResponseWriter, r *http.Request) {
+	var req ForgotPasswordRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		h.respondError(w, http.StatusBadRequest, "Invalid request body")
+		return
+	}
+
+	if errs := h.validator.ValidateStructured(&req); errs != nil {
+		h.respondValidationErrors(w, errs)
+		return
+	}
+
+	if err := h.service.RequestPasswordReset(r.Context(), req.Email); err != nil {
+		h.logger.Error("Password reset request failed", map[string]interface{}{
+			"error": err.Error(),
+			"email": req.Email,
+		})
+		// Do not return error to prevent enumeration
+	}
+
+	h.respondJSON(w, http.StatusAccepted, map[string]string{"message": "If the email exists, a reset link has been sent"})
+}
+
+// ResetPasswordRequest captures the token and new password.
+type ResetPasswordRequest struct {
+	Token       string `json:"token" validate:"required"`
+	NewPassword string `json:"new_password" validate:"required,min=8"`
+}
+
+// ResetPassword handles the password update using a reset token.
+func (h *AuthHandler) ResetPassword(w http.ResponseWriter, r *http.Request) {
+	var req ResetPasswordRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		h.respondError(w, http.StatusBadRequest, "Invalid request body")
+		return
+	}
+
+	if errs := h.validator.ValidateStructured(&req); errs != nil {
+		h.respondValidationErrors(w, errs)
+		return
+	}
+
+	if err := h.service.ResetPassword(r.Context(), req.Token, req.NewPassword); err != nil {
+		h.logger.Error("Password reset failed", map[string]interface{}{
+			"error": err.Error(),
+			"ip":    r.RemoteAddr,
+		})
+		h.respondError(w, http.StatusBadRequest, "Reset failed: "+err.Error())
+		return
+	}
+
+	h.respondJSON(w, http.StatusOK, map[string]string{"message": "Password updated successfully"})
 }
 
 func (h *AuthHandler) respondJSON(w http.ResponseWriter, status int, data interface{}) {

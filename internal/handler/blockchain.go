@@ -3,21 +3,25 @@ package handler
 import (
 	"encoding/json"
 	"net/http"
+	"strconv"
 	"time"
 
 	"kyd/internal/blockchain"
 	"kyd/internal/domain"
+	"kyd/internal/ledger"
 	"kyd/internal/middleware"
 
+	"github.com/google/uuid"
 	"github.com/gorilla/mux"
 )
 
 type BlockchainHandler struct {
-	service *blockchain.Service
+	service      *blockchain.Service
+	ledgerService *ledger.Service
 }
 
-func NewBlockchainHandler(service *blockchain.Service) *BlockchainHandler {
-	return &BlockchainHandler{service: service}
+func NewBlockchainHandler(service *blockchain.Service, ledgerService *ledger.Service) *BlockchainHandler {
+	return &BlockchainHandler{service: service, ledgerService: ledgerService}
 }
 
 func (h *BlockchainHandler) ListNetworks(w http.ResponseWriter, r *http.Request) {
@@ -161,4 +165,74 @@ func (h *BlockchainHandler) DeleteNetwork(w http.ResponseWriter, r *http.Request
 	}
 
 	respondJSON(w, http.StatusOK, map[string]string{"status": "deleted"})
+}
+
+// VerifyLedgerChain verifies the hash chain integrity for a given wallet.
+func (h *BlockchainHandler) VerifyLedgerChain(w http.ResponseWriter, r *http.Request) {
+	ut, ok := middleware.UserTypeFromContext(r.Context())
+	if !ok || ut != string(domain.UserTypeAdmin) {
+		respondError(w, http.StatusForbidden, "Forbidden")
+		return
+	}
+
+	if h.ledgerService == nil {
+		respondError(w, http.StatusServiceUnavailable, "Ledger service not available")
+		return
+	}
+
+	vars := mux.Vars(r)
+	walletIDStr := vars["wallet_id"]
+	walletID, err := uuid.Parse(walletIDStr)
+	if err != nil {
+		respondError(w, http.StatusBadRequest, "Invalid wallet ID")
+		return
+	}
+
+	okChain, err := h.ledgerService.VerifyChainIntegrity(r.Context(), walletID)
+	if err != nil {
+		respondError(w, http.StatusInternalServerError, "Failed to verify ledger chain")
+		return
+	}
+
+	respondJSON(w, http.StatusOK, map[string]interface{}{
+		"wallet_id": walletIDStr,
+		"valid":     okChain,
+	})
+}
+
+// GetLedgerChainReport returns a data-driven view of hash linkage for the last N ledger entries.
+func (h *BlockchainHandler) GetLedgerChainReport(w http.ResponseWriter, r *http.Request) {
+	ut, ok := middleware.UserTypeFromContext(r.Context())
+	if !ok || ut != string(domain.UserTypeAdmin) {
+		respondError(w, http.StatusForbidden, "Forbidden")
+		return
+	}
+
+	if h.ledgerService == nil {
+		respondError(w, http.StatusServiceUnavailable, "Ledger service not available")
+		return
+	}
+
+	vars := mux.Vars(r)
+	walletIDStr := vars["wallet_id"]
+	walletID, err := uuid.Parse(walletIDStr)
+	if err != nil {
+		respondError(w, http.StatusBadRequest, "Invalid wallet ID")
+		return
+	}
+
+	limit := 200
+	if v := r.URL.Query().Get("limit"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 && n <= 500 {
+			limit = n
+		}
+	}
+
+	report, err := h.ledgerService.GetChainReport(r.Context(), walletID, limit)
+	if err != nil {
+		respondError(w, http.StatusInternalServerError, "Failed to load ledger chain report")
+		return
+	}
+
+	respondJSON(w, http.StatusOK, report)
 }

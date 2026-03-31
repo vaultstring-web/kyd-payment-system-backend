@@ -42,8 +42,17 @@ func (s *Service) PostTransaction(ctx context.Context, posting *LedgerPosting) e
 
 	// Lock wallets in deterministic order to prevent deadlocks
 	walletIDs := []uuid.UUID{posting.DebitWalletID, posting.CreditWalletID}
-	if posting.DebitWalletID.String() > posting.CreditWalletID.String() {
-		walletIDs = []uuid.UUID{posting.CreditWalletID, posting.DebitWalletID}
+	if posting.FeeWalletID != nil {
+		walletIDs = append(walletIDs, *posting.FeeWalletID)
+	}
+
+	// sort by UUID string to lock deterministically
+	for i := 0; i < len(walletIDs); i++ {
+		for j := i + 1; j < len(walletIDs); j++ {
+			if walletIDs[i].String() > walletIDs[j].String() {
+				walletIDs[i], walletIDs[j] = walletIDs[j], walletIDs[i]
+			}
+		}
 	}
 
 	for _, walletID := range walletIDs {
@@ -135,6 +144,45 @@ func (s *Service) PostTransaction(ctx context.Context, posting *LedgerPosting) e
 		return errors.Wrap(err, "insert credit ledger entry failed")
 	}
 
+	// --- Fee credit (optional) ---
+	if posting.FeeWalletID != nil && !posting.FeeAmount.IsZero() && posting.FeeAmount.GreaterThan(decimal.Zero) {
+		var feeBalanceAfter decimal.Decimal
+		err = tx.QueryRowContext(ctx, `
+			UPDATE customer_schema.wallets
+			SET
+				available_balance = available_balance + $1,
+				ledger_balance = ledger_balance + $1,
+				last_transaction_at = NOW(),
+				updated_at = NOW()
+			WHERE id = $2
+			RETURNING available_balance
+		`, posting.FeeAmount, *posting.FeeWalletID).Scan(&feeBalanceAfter)
+		if err != nil {
+			return errors.Wrap(err, "fee wallet update failed")
+		}
+
+		feeEntryID := uuid.New()
+		feeTime := time.Now().UTC().Truncate(time.Microsecond)
+		prevHashFee, err := s.getLastHash(ctx, tx, *posting.FeeWalletID)
+		if err != nil {
+			return errors.Wrap(err, "failed to get fee previous hash")
+		}
+		hashFee := s.calculateHash(prevHashFee, feeEntryID, posting.TransactionID, *posting.FeeWalletID, "credit", posting.FeeAmount, posting.Currency, feeBalanceAfter, feeTime)
+
+		_, err = tx.ExecContext(ctx, `
+			INSERT INTO customer_schema.ledger_entries (
+				id, transaction_id, wallet_id, entry_type,
+				amount, currency, balance_after, created_at,
+				previous_hash, hash
+			) VALUES ($1, $2, $3, 'credit', $4, $5, $6, $7, $8, $9)
+		`, feeEntryID, posting.TransactionID, *posting.FeeWalletID, posting.FeeAmount, posting.Currency, feeBalanceAfter, feeTime, prevHashFee, hashFee)
+		if err != nil {
+			return errors.Wrap(err, "insert fee ledger entry failed")
+		}
+
+		_ = s.ledgerRepo.CreateEntryTx(ctx, tx, posting.TransactionID, "fee", posting.FeeAmount, posting.Currency, "completed")
+	}
+
 	// --- Record in Immutable Transaction Ledger ---
 	// We record the main transaction event.
 	eventType := posting.EventType
@@ -156,6 +204,7 @@ type LedgerPosting struct {
 	TransactionID     uuid.UUID
 	DebitWalletID     uuid.UUID
 	CreditWalletID    uuid.UUID
+	FeeWalletID       *uuid.UUID
 	DebitAmount       decimal.Decimal
 	CreditAmount      decimal.Decimal
 	Currency          domain.Currency
@@ -241,6 +290,116 @@ func (s *Service) VerifyChainIntegrity(ctx context.Context, walletID uuid.UUID) 
 	}
 
 	return true, nil
+}
+
+type ChainEntryReport struct {
+	ID                 uuid.UUID       `json:"id"`
+	TransactionID       uuid.UUID       `json:"transaction_id"`
+	WalletID            uuid.UUID       `json:"wallet_id"`
+	EntryType           string          `json:"entry_type"`
+	Amount              decimal.Decimal `json:"amount"`
+	Currency            string          `json:"currency"`
+	BalanceAfter        decimal.Decimal `json:"balance_after"`
+	CreatedAt           time.Time       `json:"created_at"`
+	PreviousHash        string          `json:"previous_hash"`
+	Hash               string          `json:"hash"`
+	ExpectedPreviousHash string         `json:"expected_previous_hash"`
+	CalculatedHash      string          `json:"calculated_hash"`
+	LinkOK              bool            `json:"link_ok"`
+	HashOK              bool            `json:"hash_ok"`
+}
+
+type ChainReportResponse struct {
+	WalletID uuid.UUID          `json:"wallet_id"`
+	Valid    bool               `json:"valid"`
+	Count    int                `json:"count"`
+	Entries  []ChainEntryReport `json:"entries"`
+}
+
+// GetChainReport returns the last N ledger entries plus per-row integrity checks.
+func (s *Service) GetChainReport(ctx context.Context, walletID uuid.UUID, limit int) (*ChainReportResponse, error) {
+	if limit <= 0 || limit > 2000 {
+		limit = 200
+	}
+
+	// Pull most recent entries, then reverse so we can validate forward.
+	rows, err := s.db.QueryContext(ctx, `
+		SELECT id, transaction_id, wallet_id, entry_type, amount, currency, balance_after, created_at, previous_hash, hash
+		FROM customer_schema.ledger_entries
+		WHERE wallet_id = $1
+		ORDER BY created_at DESC, id DESC
+		LIMIT $2
+	`, walletID, limit)
+	if err != nil {
+		return nil, errors.Wrap(err, "failed to query ledger entries")
+	}
+	defer rows.Close()
+
+	type raw struct {
+		id          uuid.UUID
+		txID        uuid.UUID
+		wID         uuid.UUID
+		entryType   string
+		amount      decimal.Decimal
+		currency    string
+		balanceAfter decimal.Decimal
+		createdAt   time.Time
+		prevHash    string
+		hash        string
+	}
+
+	var rawRows []raw
+	for rows.Next() {
+		var r raw
+		if err := rows.Scan(&r.id, &r.txID, &r.wID, &r.entryType, &r.amount, &r.currency, &r.balanceAfter, &r.createdAt, &r.prevHash, &r.hash); err != nil {
+			return nil, errors.Wrap(err, "failed to scan ledger entry")
+		}
+		rawRows = append(rawRows, r)
+	}
+
+	// Reverse into chronological order.
+	for i, j := 0, len(rawRows)-1; i < j; i, j = i+1, j-1 {
+		rawRows[i], rawRows[j] = rawRows[j], rawRows[i]
+	}
+
+	prevExpected := "0000000000000000000000000000000000000000000000000000000000000000"
+	entries := make([]ChainEntryReport, 0, len(rawRows))
+	valid := true
+
+	for _, rr := range rawRows {
+		calculated := s.calculateHash(prevExpected, rr.id, rr.txID, rr.wID, rr.entryType, rr.amount, domain.Currency(rr.currency), rr.balanceAfter, rr.createdAt)
+		linkOK := rr.prevHash == prevExpected
+		hashOK := calculated == rr.hash
+		if !linkOK || !hashOK {
+			valid = false
+		}
+
+		entries = append(entries, ChainEntryReport{
+			ID:                  rr.id,
+			TransactionID:        rr.txID,
+			WalletID:             rr.wID,
+			EntryType:            rr.entryType,
+			Amount:               rr.amount,
+			Currency:             rr.currency,
+			BalanceAfter:         rr.balanceAfter,
+			CreatedAt:            rr.createdAt,
+			PreviousHash:         rr.prevHash,
+			Hash:                rr.hash,
+			ExpectedPreviousHash: prevExpected,
+			CalculatedHash:       calculated,
+			LinkOK:              linkOK,
+			HashOK:              hashOK,
+		})
+
+		prevExpected = rr.hash
+	}
+
+	return &ChainReportResponse{
+		WalletID: walletID,
+		Valid:    valid,
+		Count:    len(entries),
+		Entries:  entries,
+	}, nil
 }
 
 // ==============================================================================

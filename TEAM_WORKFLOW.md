@@ -12,12 +12,15 @@ git pull origin main
 ```
 
 ### 2. Automated Reset & Verify (Recommended)
-We have added a helper script to automate the cleanup, build, seed, and test process.
-**PowerShell:**
+Stop containers, rebuild, migrate, seed, and verify:
 ```powershell
-./scripts/verify_env.ps1
+docker-compose down -v
+docker-compose up -d --build
+# Wait for DB ready, then:
+docker compose --profile tools run --rm migrate-runner
+docker compose --profile tools run --rm seed-runner
+./scripts/verify-fixes.ps1
 ```
-*This script will: Stop containers, remove volumes, rebuild images, start services, run migrations, seed data, and run integration tests.*
 
 ### 3. Manual Reset (Alternative)
 If you prefer to run steps manually:
@@ -38,7 +41,13 @@ Wait for logs to show `database system is ready to accept connections`.
 docker-compose logs -f postgres
 ```
 
-### 4. Run Seed Data
+### 4. Run Migrations
+Create the database schema:
+```bash
+docker compose --profile tools run --rm migrate-runner
+```
+
+### 5. Run Seed Data
 Populate the fresh database with test users (Admin, Merchant, Individuals):
 ```bash
 docker compose --profile tools run --rm seed-runner

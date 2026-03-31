@@ -79,9 +79,9 @@ func main() {
 
 	// Initialize blockchain connectors
 	stellarConnector, err := stellar.NewConnector(
-		cfg.Stellar.NetworkURL,
+		"", // force local-only connector (no external network)
 		cfg.Stellar.SecretKey,
-		true, // testnet
+		true, // always simulate locally
 	)
 	if err != nil {
 		log.Fatal("Failed to initialize Stellar connector", map[string]interface{}{
@@ -90,7 +90,7 @@ func main() {
 	}
 
 	rippleConnector, err := ripple.NewConnector(
-		cfg.Ripple.ServerURL,
+		"", // force local-only connector (no external network)
 		cfg.Ripple.SecretKey,
 	)
 	if err != nil {

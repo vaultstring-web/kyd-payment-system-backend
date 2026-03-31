@@ -58,6 +58,7 @@ type User struct {
 	UserType             UserType        `json:"user_type" db:"user_type"`
 	KYCLevel             int             `json:"kyc_level" db:"kyc_level"`
 	KYCStatus            KYCStatus       `json:"kyc_status" db:"kyc_status"`
+	UserStatus           UserStatus      `json:"user_status" db:"user_status"`
 	CountryCode          string          `json:"country_code" db:"country_code"`
 	DateOfBirth          *time.Time      `json:"date_of_birth,omitempty" db:"date_of_birth"`
 	BusinessName         *string         `json:"business_name,omitempty" db:"business_name"`
@@ -74,6 +75,11 @@ type User struct {
 	LastLogin            *time.Time      `json:"last_login,omitempty" db:"last_login"`
 	FailedLoginAttempts  int             `json:"failed_login_attempts" db:"failed_login_attempts"`
 	LockedUntil          *time.Time      `json:"locked_until,omitempty" db:"locked_until"`
+	AuthProvider         string          `json:"auth_provider,omitempty" db:"auth_provider"`
+	ProviderID           *string         `json:"provider_id,omitempty" db:"provider_id"`
+	ProviderAccessToken  string          `json:"-" db:"provider_access_token"`
+	ProviderRefreshToken string          `json:"-" db:"provider_refresh_token"`
+	ProfilePictureURL    string          `json:"profile_picture_url,omitempty" db:"profile_picture_url"`
 	CreatedAt            time.Time       `json:"created_at" db:"created_at"`
 	UpdatedAt            time.Time       `json:"updated_at" db:"updated_at"`
 }
@@ -94,6 +100,15 @@ const (
 	KYCStatusProcessing KYCStatus = "processing"
 	KYCStatusVerified   KYCStatus = "verified"
 	KYCStatusRejected   KYCStatus = "rejected"
+)
+
+type UserStatus string
+
+const (
+	UserStatusActive    UserStatus = "active"
+	UserStatusSuspended UserStatus = "suspended"
+	UserStatusBlocked   UserStatus = "blocked"
+	UserStatusDeleted   UserStatus = "deleted"
 )
 
 // Wallet represents a user's currency wallet
@@ -364,9 +379,24 @@ type BlocklistEntry struct {
 
 // SystemHealthMetric represents a system metric (e.g. error rate)
 type SystemHealthMetric struct {
-	MetricName string    `json:"metric_name" db:"metric_name"`
-	Value      float64   `json:"value" db:"value"`
+	MetricName string    `json:"metric_name" db:"metric"`
+	Value      string    `json:"value" db:"value"`
+	Status     string    `json:"status" db:"status"`
+	Change     string    `json:"change" db:"change"`
 	RecordedAt time.Time `json:"recorded_at" db:"recorded_at"`
+}
+
+// Notification represents a user-facing notification in the notification center
+type Notification struct {
+	ID         uuid.UUID `json:"id" db:"id"`
+	UserID     uuid.UUID `json:"user_id" db:"user_id"`
+	Type       string    `json:"type" db:"type"`
+	Title      string    `json:"title" db:"title"`
+	Message    string    `json:"message" db:"message"`
+	Data       Metadata  `json:"data" db:"data"`
+	IsRead     bool      `json:"is_read" db:"is_read"`
+	IsArchived bool      `json:"is_archived" db:"is_archived"`
+	CreatedAt  time.Time `json:"created_at" db:"created_at"`
 }
 
 // TransactionVolume represents daily transaction volume

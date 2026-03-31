@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"net/http"
 	"strconv"
+	"strings"
 
 	"kyd/internal/domain"
 	"kyd/internal/middleware"
@@ -47,6 +48,196 @@ func (h *PaymentHandler) InitiatePayment(w http.ResponseWriter, r *http.Request)
 	}
 
 	h.respondJSON(w, http.StatusOK, resp)
+}
+
+// GetTransaction returns a single transaction by ID (for admin).
+func (h *PaymentHandler) GetTransaction(w http.ResponseWriter, r *http.Request) {
+	ut, ok := middleware.UserTypeFromContext(r.Context())
+	if !ok || ut != string(domain.UserTypeAdmin) {
+		h.respondError(w, http.StatusForbidden, "Forbidden")
+		return
+	}
+
+	vars := mux.Vars(r)
+	id, err := uuid.Parse(vars["id"])
+	if err != nil {
+		h.respondError(w, http.StatusBadRequest, "Invalid transaction ID")
+		return
+	}
+
+	tx, err := h.service.GetTransaction(r.Context(), id)
+	if err != nil {
+		h.respondError(w, http.StatusNotFound, "Transaction not found")
+		return
+	}
+
+	h.respondJSON(w, http.StatusOK, tx)
+}
+
+// GetTransactionForUser returns a single transaction by ID for the authenticated user (sender or receiver).
+func (h *PaymentHandler) GetTransactionForUser(w http.ResponseWriter, r *http.Request) {
+	userID, ok := middleware.UserIDFromContext(r.Context())
+	if !ok {
+		h.respondError(w, http.StatusUnauthorized, "Unauthorized")
+		return
+	}
+
+	vars := mux.Vars(r)
+	id, err := uuid.Parse(vars["id"])
+	if err != nil {
+		h.respondError(w, http.StatusBadRequest, "Invalid transaction ID")
+		return
+	}
+
+	tx, err := h.service.GetTransaction(r.Context(), id)
+	if err != nil {
+		h.respondError(w, http.StatusNotFound, "Transaction not found")
+		return
+	}
+
+	// Only sender or receiver can view
+	if tx.SenderID != userID && tx.ReceiverID != userID {
+		h.respondError(w, http.StatusForbidden, "Forbidden")
+		return
+	}
+
+	h.respondJSON(w, http.StatusOK, tx)
+}
+
+// CancelPayment cancels a pending transaction (sender only).
+func (h *PaymentHandler) CancelPayment(w http.ResponseWriter, r *http.Request) {
+	userID, ok := middleware.UserIDFromContext(r.Context())
+	if !ok {
+		h.respondError(w, http.StatusUnauthorized, "Unauthorized")
+		return
+	}
+
+	vars := mux.Vars(r)
+	id, err := uuid.Parse(vars["id"])
+	if err != nil {
+		h.respondError(w, http.StatusBadRequest, "Invalid transaction ID")
+		return
+	}
+
+	if err := h.service.CancelTransaction(r.Context(), id, userID); err != nil {
+		msg := err.Error()
+		switch {
+		case strings.Contains(msg, "unauthorized"):
+			h.respondError(w, http.StatusForbidden, "Unauthorized to cancel this transaction")
+			return
+		case strings.Contains(msg, "only pending"):
+			h.respondError(w, http.StatusBadRequest, "Only pending transactions can be cancelled")
+			return
+		default:
+			h.respondError(w, http.StatusNotFound, "Transaction not found")
+			return
+		}
+	}
+
+	h.respondJSON(w, http.StatusOK, map[string]string{"message": "Transaction cancelled"})
+}
+
+// BulkPayment handles bulk payment initiation.
+func (h *PaymentHandler) BulkPayment(w http.ResponseWriter, r *http.Request) {
+	userID, ok := middleware.UserIDFromContext(r.Context())
+	if !ok {
+		h.respondError(w, http.StatusUnauthorized, "Unauthorized")
+		return
+	}
+
+	var req payment.BulkPaymentRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		h.respondError(w, http.StatusBadRequest, "Invalid request body")
+		return
+	}
+
+	req.SenderID = userID
+
+	if errs := h.validator.ValidateStructured(&req); errs != nil {
+		h.respondValidationErrors(w, errs)
+		return
+	}
+
+	result, err := h.service.BulkPayment(r.Context(), &req)
+	if err != nil {
+		h.logger.Error("Bulk payment failed", map[string]interface{}{"error": err.Error(), "sender_id": userID})
+		h.respondError(w, http.StatusInternalServerError, "Bulk payment failed")
+		return
+	}
+
+	h.respondJSON(w, http.StatusOK, result)
+}
+
+// FlagTransaction flags a transaction for review.
+func (h *PaymentHandler) FlagTransaction(w http.ResponseWriter, r *http.Request) {
+	ut, ok := middleware.UserTypeFromContext(r.Context())
+	if !ok || ut != string(domain.UserTypeAdmin) {
+		h.respondError(w, http.StatusForbidden, "Forbidden")
+		return
+	}
+
+	vars := mux.Vars(r)
+	id, err := uuid.Parse(vars["id"])
+	if err != nil {
+		h.respondError(w, http.StatusBadRequest, "Invalid transaction ID")
+		return
+	}
+
+	var req struct {
+		Reason string `json:"reason" validate:"required"`
+	}
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		h.respondError(w, http.StatusBadRequest, "Invalid request body")
+		return
+	}
+
+	if err := h.service.FlagTransaction(r.Context(), id, req.Reason); err != nil {
+		h.respondError(w, http.StatusInternalServerError, "Failed to flag transaction")
+		return
+	}
+
+	h.respondJSON(w, http.StatusOK, map[string]string{"message": "Transaction flagged"})
+}
+
+// ReverseTransaction reverses a transaction (admin-only).
+func (h *PaymentHandler) ReverseTransaction(w http.ResponseWriter, r *http.Request) {
+	ut, ok := middleware.UserTypeFromContext(r.Context())
+	if !ok || ut != string(domain.UserTypeAdmin) {
+		h.respondError(w, http.StatusForbidden, "Forbidden")
+		return
+	}
+	adminID, ok := middleware.UserIDFromContext(r.Context())
+	if !ok {
+		h.respondError(w, http.StatusUnauthorized, "Unauthorized")
+		return
+	}
+
+	vars := mux.Vars(r)
+	id, err := uuid.Parse(vars["id"])
+	if err != nil {
+		h.respondError(w, http.StatusBadRequest, "Invalid transaction ID")
+		return
+	}
+
+	var req struct {
+		Reason string `json:"reason"`
+	}
+	_ = json.NewDecoder(r.Body).Decode(&req)
+
+	if err := h.service.ReverseTransactionAdmin(r.Context(), id, adminID, req.Reason); err != nil {
+		msg := err.Error()
+		switch {
+		case strings.Contains(msg, "not eligible"):
+			h.respondError(w, http.StatusBadRequest, "Transaction is not eligible for reversal")
+		case strings.Contains(msg, "not found"):
+			h.respondError(w, http.StatusNotFound, "Transaction not found")
+		default:
+			h.respondError(w, http.StatusInternalServerError, "Failed to reverse transaction")
+		}
+		return
+	}
+
+	h.respondJSON(w, http.StatusOK, map[string]string{"message": "Transaction reversed"})
 }
 
 // GetTransactions returns paginated transactions for the authenticated user.
@@ -110,7 +301,10 @@ func (h *PaymentHandler) GetAllTransactions(w http.ResponseWriter, r *http.Reque
 		}
 	}
 
-	txs, total, err := h.service.GetAllTransactions(r.Context(), limit, offset)
+	status := r.URL.Query().Get("status")
+	currency := r.URL.Query().Get("currency")
+
+	txs, total, err := h.service.GetAllTransactionsFiltered(r.Context(), limit, offset, status, currency)
 	if err != nil {
 		h.logger.Error("Failed to fetch all transactions", map[string]interface{}{"error": err.Error()})
 		h.respondError(w, http.StatusInternalServerError, "Failed to fetch transactions")
@@ -119,6 +313,7 @@ func (h *PaymentHandler) GetAllTransactions(w http.ResponseWriter, r *http.Reque
 
 	h.respondJSON(w, http.StatusOK, map[string]interface{}{
 		"transactions": txs,
+		"items":        txs,
 		"total":        total,
 		"limit":        limit,
 		"offset":       offset,
@@ -337,7 +532,7 @@ func (h *PaymentHandler) GetRiskAlerts(w http.ResponseWriter, r *http.Request) {
 		}
 	}
 
-	alerts, err := h.service.GetRiskAlerts(r.Context(), limit, offset)
+	alerts, total, err := h.service.GetRiskAlerts(r.Context(), limit, offset)
 	if err != nil {
 		h.logger.Error("Failed to fetch risk alerts", map[string]interface{}{"error": err.Error()})
 		h.respondError(w, http.StatusInternalServerError, "Failed to fetch risk alerts")
@@ -346,7 +541,9 @@ func (h *PaymentHandler) GetRiskAlerts(w http.ResponseWriter, r *http.Request) {
 
 	h.respondJSON(w, http.StatusOK, map[string]interface{}{
 		"alerts": alerts,
-		"total":  len(alerts), // TODO: Add CountFlagged to service/repo for pagination
+		"total":  total,
+		"limit":  limit,
+		"offset": offset,
 	})
 }
 

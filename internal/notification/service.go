@@ -19,6 +19,11 @@ type AuditRepository interface {
 	Create(ctx context.Context, log *domain.AuditLog) error
 }
 
+// Repository defines persistence for stored notifications.
+type Repository interface {
+	Create(ctx context.Context, n *domain.Notification) error
+}
+
 // ChannelType represents the delivery method (Email, SMS, Push).
 type ChannelType string
 
@@ -61,16 +66,18 @@ type Service interface {
 type DefaultService struct {
 	logger    logger.Logger
 	auditRepo AuditRepository
+	repo      Repository
 	// In a real system, we'd have providers here (e.g., SendGrid, Twilio)
 	// For now, we simulate them.
 	mu sync.Mutex
 }
 
 // NewService creates a new notification service.
-func NewService(log logger.Logger, auditRepo AuditRepository) *DefaultService {
+func NewService(log logger.Logger, auditRepo AuditRepository, repo Repository) *DefaultService {
 	return &DefaultService{
 		logger:    log,
 		auditRepo: auditRepo,
+		repo:      repo,
 	}
 }
 
@@ -187,6 +194,42 @@ func (s *DefaultService) SendRaw(ctx context.Context, n *Notification) error {
 			s.logger.Error("Failed to create audit log for notification", map[string]interface{}{
 				"error":           err.Error(),
 				"notification_id": n.ID,
+			})
+		}
+	}
+
+	// Persist notification to the notification center store if configured.
+	if s.repo != nil {
+		eventType := n.Type
+		dbType := "system_update"
+		switch eventType {
+		case "PAYMENT_SENT":
+			dbType = "payment_sent"
+		case "PAYMENT_RECEIVED":
+			dbType = "payment_received"
+		case "LOGIN_NEW_DEVICE", "RISK_ALERT", "SECURITY_ALERT":
+			dbType = "security_alert"
+		default:
+			// keep default system_update
+		}
+
+		dbNotif := &domain.Notification{
+			ID:         n.ID,
+			UserID:     n.UserID,
+			Type:       dbType,
+			Title:      n.Subject,
+			Message:    n.Body,
+			Data:       n.Metadata,
+			IsRead:     false,
+			IsArchived: false,
+			CreatedAt:  n.CreatedAt,
+		}
+
+		if err := s.repo.Create(ctx, dbNotif); err != nil {
+			s.logger.Error("Failed to persist notification", map[string]interface{}{
+				"error":           err.Error(),
+				"notification_id": n.ID,
+				"user_id":         n.UserID,
 			})
 		}
 	}

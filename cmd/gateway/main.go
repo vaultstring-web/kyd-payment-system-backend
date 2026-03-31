@@ -49,7 +49,6 @@ type Gateway struct {
 }
 
 func isAdminToken(tokenStr string, secret string) bool {
-	fmt.Printf("DEBUG: Checking admin token.\n")
 	token, err := jwt.Parse(tokenStr, func(token *jwt.Token) (interface{}, error) {
 		if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
 			return nil, jwt.ErrSignatureInvalid
@@ -57,20 +56,16 @@ func isAdminToken(tokenStr string, secret string) bool {
 		return []byte(secret), nil
 	})
 	if err != nil {
-		fmt.Printf("DEBUG: Token parse error: %v\n", err)
 		return false
 	}
 	if !token.Valid {
-		fmt.Printf("DEBUG: Token invalid\n")
 		return false
 	}
 	claims, ok := token.Claims.(jwt.MapClaims)
 	if !ok {
-		fmt.Printf("DEBUG: Claims cast failed\n")
 		return false
 	}
 	ut, _ := claims["user_type"].(string)
-	fmt.Printf("DEBUG: user_type claim: '%s'\n", ut)
 	return ut == "admin"
 }
 
@@ -168,7 +163,9 @@ func createReverseProxy(target string, tlsConfig *tls.Config) *httputil.ReverseP
 	// Store original Director to capture request
 	originalDirector := proxy.Director
 	proxy.Director = func(req *http.Request) {
-		originalDirector(req)
+		if originalDirector != nil {
+			originalDirector(req)
+		}
 		// Store origin header in a custom header that gets forwarded to backend
 		// This allows ModifyResponse to access it even if backend modifies headers
 		if origin := req.Header.Get("Origin"); origin != "" {
@@ -176,13 +173,8 @@ func createReverseProxy(target string, tlsConfig *tls.Config) *httputil.ReverseP
 		}
 		// Inject Idempotency-Key for unsafe methods if missing
 		if req.Method == http.MethodPost || req.Method == http.MethodPut || req.Method == http.MethodPatch || req.Method == http.MethodDelete {
-			existingKey := req.Header.Get("Idempotency-Key")
-			if existingKey != "" {
-				fmt.Printf("[DEBUG-GATEWAY] Forwarding Existing Idempotency-Key: %s for %s %s\n", existingKey, req.Method, req.URL.Path)
-			} else {
-				newKey := uuid.NewString()
-				req.Header.Set("Idempotency-Key", newKey)
-				fmt.Printf("[DEBUG-GATEWAY] Injected NEW Idempotency-Key: %s for %s %s\n", newKey, req.Method, req.URL.Path)
+			if req.Header.Get("Idempotency-Key") == "" {
+				req.Header.Set("Idempotency-Key", uuid.NewString())
 			}
 		}
 	}
@@ -289,7 +281,14 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		}
 		// CSRF check (double-submit cookie), exempt login/register
 		path := r.URL.Path
-		if !(matchPath(path, "/api/v1/auth/login") || matchPath(path, "/api/v1/auth/register") || matchPath(path, "/api/v1/forex")) {
+		if !(matchPath(path, "/api/v1/auth/login") ||
+			matchPath(path, "/api/v1/auth/register") ||
+			matchPath(path, "/api/v1/auth/verify") ||
+			matchPath(path, "/api/v1/auth/verify/resend") ||
+			matchPath(path, "/api/v1/auth/google/callback") ||
+			matchPath(path, "/api/v1/auth/forgot-password") ||
+			matchPath(path, "/api/v1/auth/reset-password") ||
+			matchPath(path, "/api/v1/forex")) {
 			csrfCookie, _ := r.Cookie("csrf_token")
 			csrfHeader := r.Header.Get("X-CSRF-Token")
 			if csrfCookie == nil || csrfCookie.Value == "" || csrfHeader == "" || csrfCookie.Value != csrfHeader {
@@ -377,6 +376,8 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		switch {
 		case matchPath(r.URL.Path, "/api/v1/auth"):
 			g.authProxy.ServeHTTP(w, r)
+		case matchPath(r.URL.Path, "/api/v1/notifications"):
+			g.paymentProxy.ServeHTTP(w, r)
 		case matchPath(r.URL.Path, "/api/v1/admin"):
 			// Admin endpoints are handled by payment service
 			g.paymentProxy.ServeHTTP(w, r)
@@ -402,6 +403,7 @@ func (g *Gateway) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 	next.ServeHTTP(w, r)
 }
+
 func requiresGatewaySigning(path string) bool {
 	if matchPath(path, "/api/v1/payments") {
 		return true

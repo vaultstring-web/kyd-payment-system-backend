@@ -106,6 +106,7 @@ func main() {
 	api.HandleFunc("/forex/rate/{from}/{to}", forexHandler.GetRate).Methods("GET")
 	api.HandleFunc("/forex/rate", forexHandler.GetRateQuery).Methods("GET")
 	api.HandleFunc("/forex/calculate", forexHandler.Calculate).Methods("POST")
+	api.HandleFunc("/forex/history", forexHandler.GetHistory).Methods("GET")
 	api.HandleFunc("/forex/history/{from}/{to}", forexHandler.GetHistory).Methods("GET")
 
 	// WebSocket for real-time rates

@@ -11,8 +11,11 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -63,6 +66,7 @@ type Service struct {
 	notifier      notification.Service
 	auditRepo     AuditRepository
 	securityRepo  SecurityRepository
+	feeCollectorUserID *uuid.UUID
 }
 
 func NewService(
@@ -91,6 +95,13 @@ func NewService(
 		}
 	}
 
+	var feeCollectorUserID *uuid.UUID
+	if v := strings.TrimSpace(os.Getenv("TREASURY_FEE_USER_ID")); v != "" {
+		if id, err := uuid.Parse(v); err == nil {
+			feeCollectorUserID = &id
+		}
+	}
+
 	return &Service{
 		repo:          repo,
 		walletRepo:    walletRepo,
@@ -103,6 +114,7 @@ func NewService(
 		notifier:      notifier,
 		auditRepo:     auditRepo,
 		securityRepo:  securityRepo,
+		feeCollectorUserID: feeCollectorUserID,
 	}
 }
 
@@ -829,11 +841,18 @@ func (s *Service) processPayment(
 	senderWallet, receiverWallet *domain.Wallet,
 	totalDebit decimal.Decimal,
 ) error {
+	var feeWalletID *uuid.UUID
+	if s.feeCollectorUserID != nil && !tx.FeeAmount.IsZero() && tx.FeeAmount.GreaterThan(decimal.Zero) {
+		if w, err := s.walletRepo.FindByUserAndCurrency(ctx, *s.feeCollectorUserID, tx.Currency); err == nil && w != nil {
+			feeWalletID = &w.ID
+		}
+	}
 	// This must be atomic - use database transaction
 	return s.ledgerService.PostTransaction(ctx, &ledger.LedgerPosting{
 		TransactionID:     tx.ID,
 		DebitWalletID:     senderWallet.ID,
 		CreditWalletID:    receiverWallet.ID,
+		FeeWalletID:       feeWalletID,
 		DebitAmount:       totalDebit,
 		CreditAmount:      tx.ConvertedAmount,
 		Currency:          tx.Currency,
@@ -902,8 +921,39 @@ func (s *Service) generateReference() string {
 	return fmt.Sprintf("KYD-%d-%s", time.Now().Unix(), uuid.New().String()[:8])
 }
 
-func (s *Service) GetTransaction(ctx context.Context, id uuid.UUID) (*domain.Transaction, error) {
-	return s.repo.FindByID(ctx, id)
+func (s *Service) GetTransaction(ctx context.Context, id uuid.UUID) (*TransactionDetail, error) {
+	tx, err := s.repo.FindByID(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+
+	detail := &TransactionDetail{Transaction: tx}
+
+	// Enrich with Names
+	if sender, err := s.userRepo.FindByID(ctx, tx.SenderID); err == nil {
+		detail.SenderName = sender.FirstName + " " + sender.LastName
+	}
+	if receiver, err := s.userRepo.FindByID(ctx, tx.ReceiverID); err == nil {
+		detail.ReceiverName = receiver.FirstName + " " + receiver.LastName
+	}
+
+	// Enrich with Wallet Numbers
+	if tx.SenderWalletID != nil {
+		if sWallet, err := s.walletRepo.FindByID(ctx, *tx.SenderWalletID); err == nil && sWallet.WalletAddress != nil {
+			detail.SenderWalletNumber = *sWallet.WalletAddress
+		}
+	}
+	if tx.ReceiverWalletID != nil {
+		if rWallet, err := s.walletRepo.FindByID(ctx, *tx.ReceiverWalletID); err == nil && rWallet.WalletAddress != nil {
+			detail.ReceiverWalletNumber = *rWallet.WalletAddress
+		}
+	}
+
+	return detail, nil
+}
+
+func (s *Service) FlagTransaction(ctx context.Context, id uuid.UUID, reason string) error {
+	return s.repo.Flag(ctx, id, reason)
 }
 
 func (s *Service) GetUserTransactions(ctx context.Context, userID uuid.UUID, walletID *uuid.UUID, limit, offset int) ([]*TransactionDetail, int, error) {
@@ -1034,10 +1084,69 @@ func (s *Service) GetAllTransactions(ctx context.Context, limit, offset int) ([]
 	return details, total, nil
 }
 
+func (s *Service) GetAllTransactionsFiltered(ctx context.Context, limit, offset int, status string, currency string) ([]*TransactionDetail, int, error) {
+	if strings.TrimSpace(status) == "" && strings.TrimSpace(currency) == "" {
+		return s.GetAllTransactions(ctx, limit, offset)
+	}
+
+	txs, err := s.repo.FindAllWithFilters(ctx, limit, offset, status, currency)
+	if err != nil {
+		return nil, 0, err
+	}
+	total, err := s.repo.CountAllWithFilters(ctx, status, currency)
+	if err != nil {
+		return nil, 0, err
+	}
+
+	var details []*TransactionDetail
+	for _, tx := range txs {
+		detail := &TransactionDetail{Transaction: tx}
+
+		// Enrich with Names
+		if sender, err := s.userRepo.FindByID(ctx, tx.SenderID); err == nil {
+			detail.SenderName = sender.FirstName + " " + sender.LastName
+		}
+		if receiver, err := s.userRepo.FindByID(ctx, tx.ReceiverID); err == nil {
+			detail.ReceiverName = receiver.FirstName + " " + receiver.LastName
+		}
+
+		// Enrich with Wallet Numbers
+		if tx.SenderWalletID != nil {
+			if sWallet, err := s.walletRepo.FindByID(ctx, *tx.SenderWalletID); err == nil && sWallet.WalletAddress != nil {
+				detail.SenderWalletNumber = *sWallet.WalletAddress
+			}
+		}
+		if tx.ReceiverWalletID != nil {
+			if rWallet, err := s.walletRepo.FindByID(ctx, *tx.ReceiverWalletID); err == nil && rWallet.WalletAddress != nil {
+				detail.ReceiverWalletNumber = *rWallet.WalletAddress
+			}
+		}
+
+		if tx.BlockchainTxHash != "" {
+			switch tx.Status {
+			case domain.TransactionStatusCompleted:
+				detail.BlockchainStatus = "confirmed"
+			case domain.TransactionStatusFailed,
+				domain.TransactionStatusReversed,
+				domain.TransactionStatusRefunded,
+				domain.TransactionStatusCancelled:
+				detail.BlockchainStatus = "failed"
+			default:
+				detail.BlockchainStatus = "pending"
+			}
+		}
+
+		details = append(details, detail)
+	}
+
+	return details, total, nil
+}
+
 // Repository interfaces
 type Repository interface {
 	Create(ctx context.Context, tx *domain.Transaction) error
 	Update(ctx context.Context, tx *domain.Transaction) error
+	Flag(ctx context.Context, id uuid.UUID, reason string) error
 	FindByID(ctx context.Context, id uuid.UUID) (*domain.Transaction, error)
 	FindByReference(ctx context.Context, ref string) (*domain.Transaction, error)
 	FindByUserID(ctx context.Context, userID uuid.UUID, limit, offset int) ([]*domain.Transaction, error)
@@ -1054,7 +1163,10 @@ type Repository interface {
 	SumDailyVolume(ctx context.Context) (decimal.Decimal, error)
 	CountAll(ctx context.Context) (int, error)
 	FindAll(ctx context.Context, limit, offset int) ([]*domain.Transaction, error)
+	FindAllWithFilters(ctx context.Context, limit, offset int, status string, currency string) ([]*domain.Transaction, error)
+	CountAllWithFilters(ctx context.Context, status string, currency string) (int, error)
 	FindFlagged(ctx context.Context, limit, offset int) ([]*domain.Transaction, error)
+	CountFlagged(ctx context.Context) (int, error)
 	GetTransactionVolume(ctx context.Context, months int) ([]*domain.TransactionVolume, error)
 	GetSystemStats(ctx context.Context) (*domain.SystemStats, error)
 }
@@ -1346,10 +1458,144 @@ func (s *Service) GetDisputes(ctx context.Context, limit, offset int) ([]*domain
 	return txs, count, nil
 }
 
-func (s *Service) GetRiskAlerts(ctx context.Context, limit, offset int) ([]*TransactionDetail, error) {
+// ReverseTransactionAdmin reverses a transaction for support operations.
+// This is a privileged operation and should be called only from admin handlers.
+func (s *Service) ReverseTransactionAdmin(ctx context.Context, txID uuid.UUID, adminID uuid.UUID, reason string) error {
+	tx, err := s.repo.FindByID(ctx, txID)
+	if err != nil {
+		return err
+	}
+
+	if tx.Status == domain.TransactionStatusReversed {
+		return nil // idempotent
+	}
+	// Only allow reversal after value movement is done but before settlement finalization.
+	switch tx.Status {
+	case domain.TransactionStatusCompleted, domain.TransactionStatusPendingSettlement, domain.TransactionStatusDisputed:
+		// ok
+	default:
+		return errors.New("transaction is not eligible for reversal")
+	}
+
+	if tx.SenderWalletID == nil || tx.ReceiverWalletID == nil {
+		return errors.New("cannot reverse: missing wallet IDs")
+	}
+
+	// Reverse main funds movement
+	reversalPosting := &ledger.LedgerPosting{
+		Reference:         fmt.Sprintf("REV-%s", tx.Reference),
+		TransactionID:     tx.ID,
+		DebitWalletID:     *tx.ReceiverWalletID,
+		CreditWalletID:    *tx.SenderWalletID,
+		DebitAmount:       tx.NetAmount,
+		CreditAmount:      tx.NetAmount,
+		Currency:          tx.ConvertedCurrency,
+		ConvertedCurrency: tx.Currency,
+		ExchangeRate:      tx.ExchangeRate,
+		FeeAmount:         decimal.Zero,
+		EventType:         "admin_reversal",
+		Description:       fmt.Sprintf("Admin reversal for %s", tx.Reference),
+	}
+	if err := s.ledgerService.PostTransaction(ctx, reversalPosting); err != nil {
+		return fmt.Errorf("failed to reverse funds: %w", err)
+	}
+
+	// Refund fee (if we have a treasury fee wallet configured).
+	if s.feeCollectorUserID != nil && tx.FeeAmount.GreaterThan(decimal.Zero) {
+		if feeWallet, err := s.walletRepo.FindByUserAndCurrency(ctx, *s.feeCollectorUserID, tx.Currency); err == nil && feeWallet != nil {
+			feeRefund := &ledger.LedgerPosting{
+				Reference:         fmt.Sprintf("REVFEE-%s", tx.Reference),
+				TransactionID:     tx.ID,
+				DebitWalletID:     feeWallet.ID,
+				CreditWalletID:    *tx.SenderWalletID,
+				DebitAmount:       tx.FeeAmount,
+				CreditAmount:      tx.FeeAmount,
+				Currency:          tx.Currency,
+				ConvertedCurrency: tx.Currency,
+				ExchangeRate:      decimal.NewFromInt(1),
+				FeeAmount:         decimal.Zero,
+				EventType:         "fee_refund",
+				Description:       fmt.Sprintf("Fee refund for reversal %s", tx.Reference),
+			}
+			_ = s.ledgerService.PostTransaction(ctx, feeRefund)
+		}
+	}
+
+	tx.Status = domain.TransactionStatusReversed
+	now := time.Now()
+	tx.UpdatedAt = now
+	if tx.Metadata == nil {
+		tx.Metadata = make(domain.Metadata)
+	}
+	tx.Metadata["reversed_by"] = adminID.String()
+	tx.Metadata["reversed_at"] = now
+	if strings.TrimSpace(reason) != "" {
+		tx.Metadata["reversal_reason"] = strings.TrimSpace(reason)
+	}
+	if err := s.repo.Update(ctx, tx); err != nil {
+		return err
+	}
+
+	// Create a reversal transaction record for visibility (best-effort).
+	revTx := &domain.Transaction{
+		ID:               uuid.New(),
+		Reference:        fmt.Sprintf("REV-%s", tx.Reference),
+		SenderID:         tx.ReceiverID,
+		ReceiverID:       tx.SenderID,
+		SenderWalletID:   tx.ReceiverWalletID,
+		ReceiverWalletID: tx.SenderWalletID,
+		Amount:           tx.NetAmount,
+		Currency:         tx.Currency,
+		ExchangeRate:     decimal.NewFromInt(1),
+		ConvertedAmount:  tx.NetAmount,
+		ConvertedCurrency: tx.Currency,
+		FeeAmount:        decimal.Zero,
+		FeeCurrency:      tx.Currency,
+		NetAmount:        tx.NetAmount,
+		Status:           domain.TransactionStatusCompleted,
+		TransactionType:  domain.TransactionTypeReversal,
+		Description:      fmt.Sprintf("Reversal of %s: %s", tx.Reference, strings.TrimSpace(reason)),
+		InitiatedAt:      now,
+		CreatedAt:        now,
+		UpdatedAt:        now,
+		Metadata:         domain.Metadata{"reversal_of": tx.ID.String()},
+	}
+	_ = s.repo.Create(ctx, revTx)
+
+	if s.auditRepo != nil {
+		newVals := map[string]interface{}{
+			"timestamp":        now.UTC().Format(time.RFC3339),
+			"transaction_id":   tx.ID.String(),
+			"reference":        tx.Reference,
+			"reversal_reason":  strings.TrimSpace(reason),
+			"previous_status":  string(domain.TransactionStatusCompleted),
+			"resulting_status": string(domain.TransactionStatusReversed),
+		}
+		newValBytes, _ := json.Marshal(newVals)
+		_ = s.auditRepo.Create(ctx, &domain.AuditLog{
+			ID:         uuid.New(),
+			UserID:     &adminID,
+			Action:     "TRANSACTION_REVERSED",
+			EntityType: "transaction",
+			EntityID:   tx.ID.String(),
+			StatusCode: 200,
+			NewValues:  newValBytes,
+			CreatedAt:  now,
+		})
+	}
+
+	return nil
+}
+
+func (s *Service) GetRiskAlerts(ctx context.Context, limit, offset int) ([]*TransactionDetail, int, error) {
 	txs, err := s.repo.FindFlagged(ctx, limit, offset)
 	if err != nil {
-		return nil, err
+		return nil, 0, err
+	}
+
+	count, err := s.repo.CountFlagged(ctx)
+	if err != nil {
+		return nil, 0, err
 	}
 
 	var details []*TransactionDetail
@@ -1365,7 +1611,7 @@ func (s *Service) GetRiskAlerts(ctx context.Context, limit, offset int) ([]*Tran
 		details = append(details, detail)
 	}
 
-	return details, nil
+	return details, count, nil
 }
 
 func (s *Service) notifyReceiverTopUp(ctx context.Context, tx *domain.Transaction) error {

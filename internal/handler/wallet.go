@@ -3,8 +3,10 @@ package handler
 
 import (
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
+	"strings"
 
 	"kyd/internal/middleware"
 	"kyd/internal/wallet"
@@ -304,6 +306,116 @@ func (h *WalletHandler) GetTransactionHistoryAdmin(w http.ResponseWriter, r *htt
 		"limit":        limit,
 		"offset":       offset,
 		"count":        len(txs),
+	})
+}
+
+func (h *WalletHandler) FixWalletAddresses(w http.ResponseWriter, r *http.Request) {
+	ut, _ := middleware.UserTypeFromContext(r.Context())
+	if ut != "admin" {
+		h.respondError(w, http.StatusForbidden, "admin access required")
+		return
+	}
+
+	count, err := h.service.FixWalletAddresses(r.Context())
+	if err != nil {
+		h.respondError(w, http.StatusInternalServerError, "Failed to fix wallet addresses")
+		return
+	}
+
+	h.respondJSON(w, http.StatusOK, map[string]interface{}{
+		"message": fmt.Sprintf("Updated %d wallets", count),
+		"count":   count,
+	})
+}
+
+func (h *WalletHandler) GetBlockchainWallets(w http.ResponseWriter, r *http.Request) {
+	ut, _ := middleware.UserTypeFromContext(r.Context())
+	if ut != "admin" {
+		h.respondError(w, http.StatusForbidden, "admin access required")
+		return
+	}
+
+	limit, offset := parsePagination(r)
+	var uidPtr *uuid.UUID
+	userIDStr := r.URL.Query().Get("user_id")
+	if userIDStr != "" {
+		uid, err := uuid.Parse(userIDStr)
+		if err != nil {
+			h.respondError(w, http.StatusBadRequest, "Invalid user_id")
+			return
+		}
+		uidPtr = &uid
+	}
+
+	currency := strings.TrimSpace(r.URL.Query().Get("currency"))
+	q := strings.TrimSpace(r.URL.Query().Get("q"))
+
+	// If additional filters are present, fetch a larger window and paginate after filtering.
+	// This keeps compatibility with existing repo APIs while enabling admin monitoring filters.
+	if currency != "" || q != "" {
+		const fetchWindow = 5000
+		all, _, err := h.service.GetWalletsWithFilter(r.Context(), fetchWindow, 0, uidPtr)
+		if err != nil {
+			h.respondError(w, http.StatusInternalServerError, "Failed to fetch wallets")
+			return
+		}
+
+		needle := strings.ToLower(strings.ReplaceAll(q, " ", ""))
+		filtered := make([]*wallet.BalanceResponse, 0, len(all))
+		for _, wlt := range all {
+			if wlt == nil {
+				continue
+			}
+
+			if currency != "" && !strings.EqualFold(string(wlt.Currency), currency) {
+				continue
+			}
+
+			if needle != "" {
+				addr := ""
+				if wlt.WalletAddress != nil {
+					addr = *wlt.WalletAddress
+				}
+				addr = strings.ToLower(strings.ReplaceAll(addr, " ", ""))
+				if !strings.Contains(addr, needle) {
+					continue
+				}
+			}
+
+			filtered = append(filtered, wlt)
+		}
+
+		total := len(filtered)
+		start := offset
+		if start > total {
+			start = total
+		}
+		end := start + limit
+		if end > total {
+			end = total
+		}
+		wallets := filtered[start:end]
+
+		h.respondJSON(w, http.StatusOK, map[string]interface{}{
+			"addresses": wallets,
+			"total":     total,
+			"limit":     limit,
+			"offset":    offset,
+		})
+		return
+	}
+
+	wallets, total, err := h.service.GetWalletsWithFilter(r.Context(), limit, offset, uidPtr)
+	if err != nil {
+		h.respondError(w, http.StatusInternalServerError, "Failed to fetch wallets")
+		return
+	}
+
+	h.respondJSON(w, http.StatusOK, map[string]interface{}{
+		"addresses": wallets,
+		"total":     total,
+		"limit":     limit,
+		"offset":    offset,
 	})
 }
 

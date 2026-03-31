@@ -46,15 +46,20 @@ type Service struct {
 	mailer              *mailer.Mailer
 	verificationBaseURL string
 	verificationExpiry  time.Duration
+	resetBaseURL        string
+	resetExpiry         time.Duration
+	bypassVerification  bool
+	GoogleOAuth         *GoogleOAuthService // Google OAuth service
 }
 
 // NewService constructs a Service with the given repository and JWT settings.
 func NewService(repo Repository, blacklist TokenBlacklist, jwtSecret string, jwtExpiry time.Duration) *Service {
 	s := &Service{
-		repo:      repo,
-		blacklist: blacklist,
-		jwtSecret: jwtSecret,
-		jwtExpiry: jwtExpiry,
+		repo:        repo,
+		blacklist:   blacklist,
+		jwtSecret:   jwtSecret,
+		jwtExpiry:   jwtExpiry,
+		resetExpiry: 1 * time.Hour, // Default 1 hour
 	}
 	if jwtSecret != "" {
 		s.jwtSecrets = []string{jwtSecret}
@@ -84,22 +89,37 @@ func (s *Service) WithAdditionalJWTSecrets(secrets []string) *Service {
 }
 
 // WithEmailVerification configures mailer and verification options.
-func (s *Service) WithEmailVerification(m *mailer.Mailer, baseURL string, expiry time.Duration) *Service {
+func (s *Service) WithEmailVerification(m *mailer.Mailer, baseURL string, expiry time.Duration, bypass bool) *Service {
 	s.mailer = m
 	s.verificationBaseURL = baseURL
 	s.verificationExpiry = expiry
+	s.bypassVerification = bypass
+	return s
+}
+
+// WithPasswordReset configures password reset options.
+func (s *Service) WithPasswordReset(baseURL string, expiry time.Duration) *Service {
+	s.resetBaseURL = baseURL
+	s.resetExpiry = expiry
+	return s
+}
+
+// WithGoogleOAuth configures Google OAuth options.
+func (s *Service) WithGoogleOAuth(googleOAuth *GoogleOAuthService) *Service {
+	s.GoogleOAuth = googleOAuth
 	return s
 }
 
 // RegisterRequest captures the fields required to create a new user.
 type RegisterRequest struct {
-	Email       string          `json:"email" validate:"required,email"`
-	Phone       string          `json:"phone" validate:"required,phone_by_country"`
-	Password    string          `json:"password" validate:"required,min=8"`
-	FirstName   string          `json:"first_name" validate:"required"`
-	LastName    string          `json:"last_name" validate:"required"`
-	UserType    domain.UserType `json:"user_type" validate:"required"`
-	CountryCode string          `json:"country_code" validate:"required,len=2"`
+	Email        string          `json:"email" validate:"required,email"`
+	Phone        string          `json:"phone" validate:"required,phone_by_country"`
+	Password     string          `json:"password" validate:"required,min=8"`
+	FirstName    string          `json:"first_name" validate:"required"`
+	LastName     string          `json:"last_name" validate:"required"`
+	UserType     domain.UserType `json:"user_type" validate:"required"`
+	CountryCode  string          `json:"country_code" validate:"required,len=2"`
+	BusinessName string          `json:"business_name"`
 }
 
 // LoginRequest captures credentials for login.
@@ -145,20 +165,25 @@ func (s *Service) Register(ctx context.Context, req *RegisterRequest) (*TokenRes
 
 	// Create user
 	user := &domain.User{
-		ID:           uuid.New(),
-		Email:        req.Email,
-		Phone:        req.Phone,
-		PasswordHash: string(passwordHash),
-		FirstName:    req.FirstName,
-		LastName:     req.LastName,
-		UserType:     req.UserType,
-		KYCLevel:     0,
-		KYCStatus:    domain.KYCStatusPending,
-		CountryCode:  req.CountryCode,
-		RiskScore:    decimal.Zero,
-		IsActive:     true,
-		CreatedAt:    time.Now(),
-		UpdatedAt:    time.Now(),
+		ID:            uuid.New(),
+		Email:         req.Email,
+		Phone:         req.Phone,
+		PasswordHash:  string(passwordHash),
+		FirstName:     req.FirstName,
+		LastName:      req.LastName,
+		UserType:      req.UserType,
+		KYCLevel:      0,
+		KYCStatus:     domain.KYCStatusPending,
+		CountryCode:   req.CountryCode,
+		RiskScore:     decimal.Zero,
+		IsActive:      true,
+		EmailVerified: s.bypassVerification,
+		CreatedAt:     time.Now(),
+		UpdatedAt:     time.Now(),
+	}
+
+	if req.BusinessName != "" {
+		user.BusinessName = &req.BusinessName
 	}
 
 	if err := s.repo.Create(ctx, user); err != nil {
@@ -171,7 +196,7 @@ func (s *Service) Register(ctx context.Context, req *RegisterRequest) (*TokenRes
 	}
 
 	// Send email verification if configured
-	if s.mailer != nil && s.verificationBaseURL != "" {
+	if s.mailer != nil && s.verificationBaseURL != "" && !s.bypassVerification {
 		_ = s.sendVerificationEmail(user)
 	}
 
@@ -198,10 +223,10 @@ func (s *Service) Login(ctx context.Context, req *LoginRequest) (*TokenResponse,
 	// Verify TOTP if enabled
 	if user.IsTOTPEnabled {
 		if req.TOTPCode == "" {
-			return nil, kyderrors.ErrInvalidCredentials // Or a specific error indicating TOTP required
+			return nil, kyderrors.ErrTOTPRequired
 		}
 		if user.TOTPSecret == nil || !totp.Validate(req.TOTPCode, *user.TOTPSecret) {
-			return nil, kyderrors.ErrInvalidCredentials
+			return nil, kyderrors.ErrInvalidTOTP
 		}
 	}
 
@@ -328,6 +353,22 @@ func (s *Service) ListUsers(ctx context.Context, limit, offset int, userType str
 	return users, total, nil
 }
 
+// ListUsersAdmin returns a paginated list of users with admin filters.
+func (s *Service) ListUsersAdmin(ctx context.Context, limit, offset int, userType string, kycStatus string) ([]*domain.User, int, error) {
+	if userType == "" && kycStatus == "" {
+		return s.ListUsers(ctx, limit, offset, "")
+	}
+	users, err := s.repo.FindAllWithFilters(ctx, limit, offset, userType, kycStatus)
+	if err != nil {
+		return nil, 0, err
+	}
+	total, err := s.repo.CountAllWithFilters(ctx, userType, kycStatus)
+	if err != nil {
+		return nil, 0, err
+	}
+	return users, total, nil
+}
+
 // ChangePassword updates a user's password hash after validating complexity.
 func (s *Service) ChangePassword(ctx context.Context, user *domain.User, newPassword string) error {
 	if err := validatePassword(newPassword); err != nil {
@@ -340,6 +381,17 @@ func (s *Service) ChangePassword(ctx context.Context, user *domain.User, newPass
 	user.PasswordHash = string(hash)
 	now := time.Now()
 	user.UpdatedAt = now
+	return s.repo.Update(ctx, user)
+}
+
+func (s *Service) DeleteUser(ctx context.Context, id uuid.UUID) error {
+	user, err := s.repo.FindByID(ctx, id)
+	if err != nil {
+		return err
+	}
+	user.IsActive = false
+	user.UserStatus = domain.UserStatusDeleted
+	user.UpdatedAt = time.Now()
 	return s.repo.Update(ctx, user)
 }
 
@@ -378,6 +430,12 @@ func (s *Service) sendVerificationEmail(user *domain.User) error {
 		return err
 	}
 	link := fmt.Sprintf("%s?token=%s", s.verificationBaseURL, signed)
+
+	if s.bypassVerification {
+		fmt.Printf("\n[DEV] EMAIL VERIFICATION LINK for %s: %s\n\n", user.Email, link)
+		return nil
+	}
+
 	body := fmt.Sprintf(`<p>Hello %s,</p>
 <p>Verify your email by clicking the link below:</p>
 <p><a href="%s">%s</a></p>
@@ -386,7 +444,7 @@ func (s *Service) sendVerificationEmail(user *domain.User) error {
 }
 
 func (s *Service) SendVerificationByEmail(ctx context.Context, email string) error {
-	if s.mailer == nil || s.verificationBaseURL == "" {
+	if s.mailer == nil || s.verificationBaseURL == "" || s.bypassVerification {
 		return nil
 	}
 	user, err := s.repo.FindByEmail(ctx, email)
@@ -398,19 +456,23 @@ func (s *Service) SendVerificationByEmail(ctx context.Context, email string) err
 
 // VerifyEmail decodes the verification token and marks the user's email as verified.
 func (s *Service) VerifyEmail(ctx context.Context, tokenString string) error {
-	token, err := jwt.Parse(tokenString, func(token *jwt.Token) (interface{}, error) {
-		if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
-			return nil, jwt.ErrSignatureInvalid
+	var token *jwt.Token
+	var err error
+
+	// Try all configured secrets
+	for _, secret := range s.jwtSecrets {
+		token, err = jwt.Parse(tokenString, func(token *jwt.Token) (interface{}, error) {
+			if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
+				return nil, jwt.ErrSignatureInvalid
+			}
+			return []byte(secret), nil
+		})
+		if err == nil && token.Valid {
+			break
 		}
-		if s.jwtSecret != "" {
-			return []byte(s.jwtSecret), nil
-		}
-		if len(s.jwtSecrets) > 0 {
-			return []byte(s.jwtSecrets[0]), nil
-		}
-		return nil, jwt.ErrSignatureInvalid
-	})
-	if err != nil || !token.Valid {
+	}
+
+	if err != nil || token == nil || !token.Valid {
 		return kyderrors.ErrInvalidCredentials
 	}
 	claims, ok := token.Claims.(jwt.MapClaims)
@@ -434,6 +496,108 @@ func (s *Service) VerifyEmail(ctx context.Context, tokenString string) error {
 // DebugFindByEmail finds a user by email for debugging purposes.
 func (s *Service) DebugFindByEmail(ctx context.Context, email string) (*domain.User, error) {
 	return s.repo.FindByEmail(ctx, email)
+}
+
+// RequestPasswordReset generates a reset token and sends a reset email.
+func (s *Service) RequestPasswordReset(ctx context.Context, email string) error {
+	if s.mailer == nil || s.resetBaseURL == "" {
+		return errors.New("password reset is not configured")
+	}
+
+	user, err := s.repo.FindByEmail(ctx, email)
+	if err != nil {
+		// Do not return error to prevent user enumeration
+		return nil
+	}
+
+	// Generate a reset token
+	claims := jwt.MapClaims{
+		"user_id": user.ID.String(),
+		"purpose": "password_reset",
+		"exp":     time.Now().Add(s.resetExpiry).Unix(),
+	}
+
+	token := jwt.NewWithClaims(jwt.SigningMethodHS256, claims)
+	signed, err := token.SignedString([]byte(s.jwtSecret))
+	if err != nil {
+		return err
+	}
+
+	link := fmt.Sprintf("%s?token=%s", s.resetBaseURL, signed)
+
+	if s.bypassVerification {
+		fmt.Printf("\n[DEV] PASSWORD RESET LINK for %s: %s\n\n", user.Email, link)
+		return nil
+	}
+
+	body := fmt.Sprintf(`<p>Hello %s,</p>
+<p>You requested a password reset. Click the link below to set a new password:</p>
+<p><a href="%s">%s</a></p>
+<p>This link will expire in 1 hour. If you did not request this, please ignore this email.</p>`,
+		user.FirstName, link, link)
+
+	return s.mailer.Send(user.Email, "Reset your password", body)
+}
+
+// ResetPassword validates the reset token and updates the user's password.
+func (s *Service) ResetPassword(ctx context.Context, tokenString, newPassword string) error {
+	if err := validatePassword(newPassword); err != nil {
+		return err
+	}
+
+	var token *jwt.Token
+	var err error
+
+	// Try all configured secrets
+	for _, secret := range s.jwtSecrets {
+		token, err = jwt.Parse(tokenString, func(token *jwt.Token) (interface{}, error) {
+			if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
+				return nil, jwt.ErrSignatureInvalid
+			}
+			return []byte(secret), nil
+		})
+		if err == nil && token.Valid {
+			break
+		}
+	}
+
+	if err != nil || token == nil || !token.Valid {
+		return kyderrors.ErrInvalidCredentials
+	}
+
+	claims, ok := token.Claims.(jwt.MapClaims)
+	if !ok {
+		return kyderrors.ErrInvalidCredentials
+	}
+
+	if purpose, _ := claims["purpose"].(string); purpose != "password_reset" {
+		return kyderrors.ErrInvalidCredentials
+	}
+
+	userIDStr, ok := claims["user_id"].(string)
+	if !ok {
+		return kyderrors.ErrInvalidCredentials
+	}
+
+	id, err := uuid.Parse(userIDStr)
+	if err != nil {
+		return kyderrors.ErrInvalidCredentials
+	}
+
+	user, err := s.repo.FindByID(ctx, id)
+	if err != nil {
+		return err
+	}
+
+	// Update password
+	passwordHash, err := bcrypt.GenerateFromPassword([]byte(newPassword), bcrypt.DefaultCost)
+	if err != nil {
+		return err
+	}
+	user.PasswordHash = string(passwordHash)
+	user.UpdatedAt = time.Now()
+
+	return s.repo.Update(ctx, user)
 }
 
 func generateRandomToken(length int) (string, error) {
@@ -497,4 +661,6 @@ type Repository interface {
 	IsCountryTrusted(ctx context.Context, userID uuid.UUID, countryCode string) (bool, error)
 	FindAll(ctx context.Context, limit, offset int, userType string) ([]*domain.User, error)
 	CountAll(ctx context.Context, userType string) (int, error)
+	FindAllWithFilters(ctx context.Context, limit, offset int, userType string, kycStatus string) ([]*domain.User, error)
+	CountAllWithFilters(ctx context.Context, userType string, kycStatus string) (int, error)
 }

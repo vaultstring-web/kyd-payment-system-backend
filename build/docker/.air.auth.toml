@@ -1,0 +1,26 @@
+root = "."
+tmp_dir = "tmp"
+
+[build]
+  bin = "./tmp/auth-service"
+  cmd = "go build -o ./tmp/auth-service ./cmd/auth"
+  delay = 1000
+  exclude_dir = ["assets", "tmp", "vendor", "testdata", "migrations", "tmp_cache", ".git"]
+  include_ext = ["go", "tpl", "tmpl", "html"]
+  kill_delay = "0s"
+  log = "build-errors.log"
+  send_interrupt = false
+  stop_on_error = true
+
+[color]
+  app = ""
+  build = "yellow"
+  main = "magenta"
+  runner = "green"
+  watcher = "cyan"
+
+[log]
+  time = false
+
+[misc]
+  clean_on_exit = true

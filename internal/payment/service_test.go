@@ -22,6 +22,11 @@ type MockRepository struct {
 	mock.Mock
 }
 
+func (m *MockRepository) Flag(ctx context.Context, id uuid.UUID, reason string) error {
+	args := m.Called(ctx, id, reason)
+	return args.Error(0)
+}
+
 func (m *MockRepository) Create(ctx context.Context, tx *domain.Transaction) error {
 	args := m.Called(ctx, tx)
 	return args.Error(0)
@@ -130,6 +135,19 @@ func (m *MockRepository) FindAll(ctx context.Context, limit, offset int) ([]*dom
 	return args.Get(0).([]*domain.Transaction), args.Error(1)
 }
 
+func (m *MockRepository) FindAllWithFilters(ctx context.Context, limit, offset int, status string, currency string) ([]*domain.Transaction, error) {
+	args := m.Called(ctx, limit, offset, status, currency)
+	if args.Get(0) == nil {
+		return nil, args.Error(1)
+	}
+	return args.Get(0).([]*domain.Transaction), args.Error(1)
+}
+
+func (m *MockRepository) CountAllWithFilters(ctx context.Context, status string, currency string) (int, error) {
+	args := m.Called(ctx, status, currency)
+	return args.Int(0), args.Error(1)
+}
+
 func (m *MockRepository) GetTransactionVolume(ctx context.Context, months int) ([]*domain.TransactionVolume, error) {
 	args := m.Called(ctx, months)
 	if args.Get(0) == nil {
@@ -152,6 +170,11 @@ func (m *MockRepository) FindFlagged(ctx context.Context, limit, offset int) ([]
 		return nil, args.Error(1)
 	}
 	return args.Get(0).([]*domain.Transaction), args.Error(1)
+}
+
+func (m *MockRepository) CountFlagged(ctx context.Context) (int, error) {
+	args := m.Called(ctx)
+	return args.Int(0), args.Error(1)
 }
 
 type MockWalletRepository struct {

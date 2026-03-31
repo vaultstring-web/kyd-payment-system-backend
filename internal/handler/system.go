@@ -7,9 +7,13 @@ import (
 	"strconv"
 	"time"
 
+	"kyd/internal/domain"
+	"kyd/internal/middleware"
 	"kyd/internal/repository/postgres"
 
+	"github.com/google/uuid"
 	"github.com/jmoiron/sqlx"
+	"github.com/gorilla/mux"
 	"github.com/redis/go-redis/v9"
 )
 
@@ -17,15 +21,17 @@ type SystemHandler struct {
 	db          *sqlx.DB
 	redisClient *redis.Client
 	auditRepo   *postgres.AuditRepository
+	notifRepo   *postgres.NotificationRepository
 	logger      Logger
 	startTime   time.Time
 }
 
-func NewSystemHandler(db *sqlx.DB, redisClient *redis.Client, auditRepo *postgres.AuditRepository, log Logger) *SystemHandler {
+func NewSystemHandler(db *sqlx.DB, redisClient *redis.Client, auditRepo *postgres.AuditRepository, notifRepo *postgres.NotificationRepository, log Logger) *SystemHandler {
 	return &SystemHandler{
 		db:          db,
 		redisClient: redisClient,
 		auditRepo:   auditRepo,
+		notifRepo:   notifRepo,
 		logger:      log,
 		startTime:   time.Now(),
 	}
@@ -170,6 +176,131 @@ func (h *SystemHandler) GetSystemStatus(w http.ResponseWriter, r *http.Request) 
 	})
 
 	h.respondJSON(w, http.StatusOK, SystemStatusResponse{Services: services})
+}
+
+func (h *SystemHandler) GetNotifications(w http.ResponseWriter, r *http.Request) {
+	ut, ok := middleware.UserTypeFromContext(r.Context())
+	if !ok || ut != string(domain.UserTypeAdmin) {
+		h.respondError(w, http.StatusForbidden, "Forbidden")
+		return
+	}
+
+	limit := 50
+	offset := 0
+	if v := r.URL.Query().Get("limit"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n > 0 {
+			limit = n
+		}
+	}
+	if v := r.URL.Query().Get("offset"); v != "" {
+		if n, err := strconv.Atoi(v); err == nil && n >= 0 {
+			offset = n
+		}
+	}
+
+	records, total, err := h.notifRepo.ListAll(r.Context(), limit, offset)
+	if err != nil {
+		h.logger.Error("Failed to list notifications (admin)", map[string]interface{}{
+			"error": err.Error(),
+		})
+		h.respondError(w, http.StatusInternalServerError, "Failed to fetch notifications")
+		return
+	}
+
+	type adminNotification struct {
+		ID        string          `json:"id"`
+		UserID    string          `json:"user_id"`
+		Type      string          `json:"type"`
+		Title     string          `json:"title"`
+		Message   string          `json:"message"`
+		Data      domain.Metadata `json:"data"`
+		IsRead    bool            `json:"is_read"`
+		CreatedAt time.Time       `json:"created_at"`
+	}
+
+	items := make([]adminNotification, 0, len(records))
+	for _, n := range records {
+		items = append(items, adminNotification{
+			ID:        n.ID.String(),
+			UserID:    n.UserID.String(),
+			Type:      n.Type,
+			Title:     n.Title,
+			Message:   n.Message,
+			Data:      n.Data,
+			IsRead:    n.IsRead,
+			CreatedAt: n.CreatedAt,
+		})
+	}
+
+	response := map[string]interface{}{
+		"notifications": items,
+		"total":         total,
+		"limit":         limit,
+		"offset":        offset,
+	}
+
+	h.respondJSON(w, http.StatusOK, response)
+}
+
+func (h *SystemHandler) MarkNotificationRead(w http.ResponseWriter, r *http.Request) {
+	ut, ok := middleware.UserTypeFromContext(r.Context())
+	if !ok || ut != string(domain.UserTypeAdmin) {
+		h.respondError(w, http.StatusForbidden, "Forbidden")
+		return
+	}
+
+	idStr := mux.Vars(r)["id"]
+	id, err := uuid.Parse(idStr)
+	if err != nil {
+		h.respondError(w, http.StatusBadRequest, "Invalid notification ID")
+		return
+	}
+
+	if err := h.notifRepo.MarkRead(r.Context(), id); err != nil {
+		h.logger.Error("Failed to mark notification read (admin)", map[string]interface{}{"error": err.Error(), "id": idStr})
+		h.respondError(w, http.StatusInternalServerError, "Failed to mark notification read")
+		return
+	}
+
+	h.respondJSON(w, http.StatusOK, map[string]string{"message": "ok"})
+}
+
+func (h *SystemHandler) MarkAllNotificationsRead(w http.ResponseWriter, r *http.Request) {
+	ut, ok := middleware.UserTypeFromContext(r.Context())
+	if !ok || ut != string(domain.UserTypeAdmin) {
+		h.respondError(w, http.StatusForbidden, "Forbidden")
+		return
+	}
+
+	if err := h.notifRepo.MarkAllRead(r.Context()); err != nil {
+		h.logger.Error("Failed to mark all notifications read (admin)", map[string]interface{}{"error": err.Error()})
+		h.respondError(w, http.StatusInternalServerError, "Failed to mark all notifications read")
+		return
+	}
+	h.respondJSON(w, http.StatusOK, map[string]string{"message": "ok"})
+}
+
+func (h *SystemHandler) ArchiveNotification(w http.ResponseWriter, r *http.Request) {
+	ut, ok := middleware.UserTypeFromContext(r.Context())
+	if !ok || ut != string(domain.UserTypeAdmin) {
+		h.respondError(w, http.StatusForbidden, "Forbidden")
+		return
+	}
+
+	idStr := mux.Vars(r)["id"]
+	id, err := uuid.Parse(idStr)
+	if err != nil {
+		h.respondError(w, http.StatusBadRequest, "Invalid notification ID")
+		return
+	}
+
+	if err := h.notifRepo.Archive(r.Context(), id); err != nil {
+		h.logger.Error("Failed to archive notification (admin)", map[string]interface{}{"error": err.Error(), "id": idStr})
+		h.respondError(w, http.StatusInternalServerError, "Failed to archive notification")
+		return
+	}
+
+	h.respondJSON(w, http.StatusOK, map[string]string{"message": "ok"})
 }
 
 // Reuse respondJSON from other handlers or duplicate helper if necessary

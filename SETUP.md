@@ -32,12 +32,16 @@ This guide helps teammates clone, configure, and run the backend.
    - Redis (Cache)
    - API Gateway (:9000)
    - Microservices (Auth, Payment, Wallet, Forex, Settlement)
-   - Frontend (if included in compose)
+   - *Frontends are not started* by default. Use `--profile frontend` and ensure sibling dirs `admin` and `vaultstring-frontend` exist.
 
-   *Migrations run automatically on startup.*
+4. **Run Migrations and Seed** (first-time or after schema changes)
+   Wait for postgres to be ready, then:
+   ```powershell
+   docker compose --profile tools run --rm migrate-runner
+   docker compose --profile tools run --rm seed-runner
+   ```
 
-4. **Verify Deployment**
-   Wait for logs to settle ("database system is ready to accept connections"), then run:
+5. **Verify Deployment**
    ```powershell
    ./scripts/verify-fixes.ps1
    ```
@@ -79,6 +83,50 @@ If you must run services locally without Docker:
 - **PII Encryption**: Data in DB is encrypted. If you inspect the DB directly, you'll see ciphertext for emails/phones.
 - **SSL/TLS**: Enforced in production. Local dev uses `disable` mode for convenience.
 - **Passwords**: Must include Upper, Lower, Number, Special Char.
+
+## Production Readiness & Environment
+
+The system is configured for production-grade security and reliability.
+
+### Core Security Keys
+The following keys are **MANDATORY** and must be kept consistent across all services and the seed runner:
+- `JWT_SECRET`: Signing key for authentication tokens.
+- `ENCRYPTION_KEY`: 32-byte (64-char hex) key for AES-GCM data encryption.
+- `HMAC_KEY`: 32-byte (64-char hex) key for blind indexing (PII searches).
+
+### Google OAuth Integration
+- `GOOGLE_MOCK_MODE`: Set to `false` for production to enable real Google authentication.
+- `GOOGLE_CLIENT_ID` / `GOOGLE_CLIENT_SECRET`: Required when mock mode is disabled.
+
+### Database Schema & Migrations
+Migrations are **not** run automatically. Run them explicitly before seeding:
+```powershell
+# With Docker (recommended): ensure postgres is running first, then:
+docker compose up -d postgres redis
+docker compose --profile tools run --rm migrate-runner
+
+# Or locally (with Go installed and postgres reachable):
+$env:DATABASE_URL = "postgres://kyd_user:kyd_password@localhost:5432/kyd_dev?sslmode=disable"
+go run ./cmd/migrate/main.go up
+```
+
+### Seeding Data
+To populate the database with production-ready test accounts (including admin):
+```bash
+docker compose --profile tools run --rm seed-runner
+```
+Default Admin: `admin@kyd.com` / `password123`
+
+### Frontend Services
+Frontends (Admin Portal, Customer App) are optional and use the `frontend` compose profile:
+```bash
+docker-compose --profile frontend up --build
+```
+**Expectations**: The compose file expects sibling directories:
+- `../admin` – Admin portal (Next.js, port 3016)
+- `../vaultstring-frontend` – Customer app (Next.js, port 3012)
+
+If these directories are missing, the frontend build will fail. For backend-only development, omit the `--profile frontend` flag.
 
 ## Risk Engine Configuration
 

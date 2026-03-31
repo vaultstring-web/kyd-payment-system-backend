@@ -62,6 +62,9 @@ type TransactionLedger = pkg.TransactionLedger
 // SecurityEvent represents a security-related event.
 type SecurityEvent = pkg.SecurityEvent
 
+// Notification represents a user-facing notification in the notification center.
+type Notification = pkg.Notification
+
 // BlocklistEntry represents a blocked entity.
 type BlocklistEntry = pkg.BlocklistEntry
 
@@ -188,4 +191,12 @@ const (
 	SecurityEventStatusInvestigating = pkg.SecurityEventStatusInvestigating
 	SecurityEventStatusResolved      = pkg.SecurityEventStatusResolved
 	SecurityEventStatusFalsePositive = pkg.SecurityEventStatusFalsePositive
+)
+
+// Re-exported user statuses.
+const (
+	UserStatusActive    = pkg.UserStatusActive
+	UserStatusSuspended = pkg.UserStatusSuspended
+	UserStatusBlocked   = pkg.UserStatusBlocked
+	UserStatusDeleted   = pkg.UserStatusDeleted
 )

@@ -272,6 +272,20 @@ func (r *TransactionRepository) FindFlagged(ctx context.Context, limit, offset i
 	return txs, nil
 }
 
+func (r *TransactionRepository) CountFlagged(ctx context.Context) (int, error) {
+	var total int
+	query := `
+        SELECT COUNT(*) 
+        FROM customer_schema.transactions 
+        WHERE metadata->>'flagged' = 'true'
+    `
+	err := r.db.GetContext(ctx, &total, query)
+	if err != nil {
+		return 0, errors.Wrap(err, "failed to count flagged transactions")
+	}
+	return total, nil
+}
+
 func (r *TransactionRepository) FindByWalletID(ctx context.Context, walletID uuid.UUID, limit, offset int) ([]*domain.Transaction, error) {
 	var txs []*domain.Transaction
 	query := `
@@ -361,6 +375,74 @@ func (r *TransactionRepository) CountAll(ctx context.Context) (int, error) {
 	var total int
 	query := `SELECT COUNT(*) FROM customer_schema.transactions`
 	err := r.db.GetContext(ctx, &total, query)
+	if err != nil {
+		return 0, errors.Wrap(err, "failed to count transactions")
+	}
+	return total, nil
+}
+
+func (r *TransactionRepository) FindAllWithFilters(ctx context.Context, limit, offset int, status string, currency string) ([]*domain.Transaction, error) {
+	var txs []*domain.Transaction
+	query := `
+        SELECT 
+            id, reference, sender_id, receiver_id, sender_wallet_id, receiver_wallet_id,
+            amount, currency, exchange_rate, converted_amount, converted_currency,
+            fee_amount, COALESCE(fee_currency, '') AS fee_currency, COALESCE(net_amount, converted_amount) AS net_amount,
+            status, COALESCE(status_reason, '') AS status_reason, transaction_type, COALESCE(channel, '') AS channel, COALESCE(category, '') AS category, COALESCE(description, '') AS description,
+            metadata, COALESCE(blockchain_tx_hash, '') AS blockchain_tx_hash, settlement_id, initiated_at, completed_at,
+            created_at, updated_at
+        FROM customer_schema.transactions
+    `
+
+	var (
+		clauses []string
+		args    []interface{}
+	)
+
+	if strings.TrimSpace(status) != "" {
+		args = append(args, strings.TrimSpace(status))
+		clauses = append(clauses, fmt.Sprintf("status = $%d", len(args)))
+	}
+	if strings.TrimSpace(currency) != "" {
+		args = append(args, strings.TrimSpace(currency))
+		clauses = append(clauses, fmt.Sprintf("currency = $%d", len(args)))
+	}
+	if len(clauses) > 0 {
+		query += " WHERE " + strings.Join(clauses, " AND ")
+	}
+
+	query += ` ORDER BY created_at DESC LIMIT $` + fmt.Sprint(len(args)+1) + ` OFFSET $` + fmt.Sprint(len(args)+2)
+	args = append(args, limit, offset)
+
+	err := r.db.SelectContext(ctx, &txs, query, args...)
+	if err != nil {
+		return nil, errors.Wrap(err, "failed to find transactions")
+	}
+	return txs, nil
+}
+
+func (r *TransactionRepository) CountAllWithFilters(ctx context.Context, status string, currency string) (int, error) {
+	var total int
+	query := `SELECT COUNT(*) FROM customer_schema.transactions`
+
+	var (
+		clauses []string
+		args    []interface{}
+	)
+
+	if strings.TrimSpace(status) != "" {
+		args = append(args, strings.TrimSpace(status))
+		clauses = append(clauses, fmt.Sprintf("status = $%d", len(args)))
+	}
+	if strings.TrimSpace(currency) != "" {
+		args = append(args, strings.TrimSpace(currency))
+		clauses = append(clauses, fmt.Sprintf("currency = $%d", len(args)))
+	}
+	if len(clauses) > 0 {
+		query += " WHERE " + strings.Join(clauses, " AND ")
+	}
+
+	err := r.db.GetContext(ctx, &total, query, args...)
 	if err != nil {
 		return 0, errors.Wrap(err, "failed to count transactions")
 	}
@@ -535,4 +617,27 @@ func (r *TransactionRepository) CountByStatus(ctx context.Context, status domain
 		return 0, errors.Wrap(err, "failed to count transactions by status")
 	}
 	return total, nil
+}
+
+func (r *TransactionRepository) GetTotalVolumeForUser(ctx context.Context, userID uuid.UUID) (decimal.Decimal, error) {
+	var total decimal.NullDecimal
+	query := `SELECT SUM(converted_amount) FROM customer_schema.transactions WHERE (sender_id = $1 OR receiver_id = $1) AND status = 'completed'`
+	err := r.db.GetContext(ctx, &total, query, userID)
+	if err != nil {
+		return decimal.Zero, errors.Wrap(err, "failed to get total volume for user")
+	}
+	if !total.Valid {
+		return decimal.Zero, nil
+	}
+	return total.Decimal, nil
+}
+
+func (r *TransactionRepository) CountForUser(ctx context.Context, userID uuid.UUID) (int, error) {
+	var count int
+	query := `SELECT COUNT(*) FROM customer_schema.transactions WHERE sender_id = $1 OR receiver_id = $1`
+	err := r.db.GetContext(ctx, &count, query, userID)
+	if err != nil {
+		return 0, errors.Wrap(err, "failed to count transactions for user")
+	}
+	return count, nil
 }

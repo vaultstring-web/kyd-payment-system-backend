@@ -6,6 +6,7 @@ package settlement
 import (
 	"context"
 	"fmt"
+	"strings"
 	"time"
 
 	"kyd/internal/domain"
@@ -55,22 +56,33 @@ func (s *Service) startSettlementWorker() {
 		})
 	}
 
-	ticker := time.NewTicker(1 * time.Hour)
+	ticker := time.NewTicker(30 * time.Second) // Check every 30 seconds instead of 1 hour
 	defer ticker.Stop()
 
 	for range ticker.C {
+		// 1. Process batches of pending transactions
 		if err := s.ProcessPendingSettlements(ctx); err != nil {
 			s.logger.Error("Settlement worker error", map[string]interface{}{
 				"error": err.Error(),
 			})
 		}
 
+		// 2. Check status of submitted settlements on blockchain
 		if err := s.RecoverPendingSettlements(ctx); err != nil {
 			s.logger.Error("Recovery worker error", map[string]interface{}{
 				"error": err.Error(),
 			})
 		}
+		
+		// 3. Monitor individual submitted settlements (fallback)
+		submitted, _ := s.repo.FindSubmitted(ctx)
+		for _, set := range submitted {
+			if set.TransactionHash != "" {
+				go s.monitorSettlement(set.ID, set.TransactionHash)
+			}
+		}
 
+		// 4. Cleanup old stuck transactions
 		if err := s.CleanupStuckTransactions(ctx); err != nil {
 			s.logger.Error("Cleanup worker error", map[string]interface{}{
 				"error": err.Error(),
@@ -343,12 +355,102 @@ func (s *Service) generateBatchReference() string {
 	return fmt.Sprintf("BATCH-%d-%s", time.Now().Unix(), uuid.New().String()[:8])
 }
 
+func (s *Service) ListSettlements(ctx context.Context, limit, offset int) ([]*domain.Settlement, int, error) {
+	settlements, err := s.repo.FindAll(ctx, limit, offset)
+	if err != nil {
+		return nil, 0, err
+	}
+	total, _ := s.repo.CountAll(ctx)
+	return settlements, total, nil
+}
+
+func (s *Service) ListSettlementsFiltered(ctx context.Context, limit, offset int, status string, currency string, network string) ([]*domain.Settlement, int, error) {
+	if strings.TrimSpace(status) == "" && strings.TrimSpace(currency) == "" && strings.TrimSpace(network) == "" {
+		return s.ListSettlements(ctx, limit, offset)
+	}
+	settlements, err := s.repo.FindAllWithFilters(ctx, limit, offset, status, currency, network)
+	if err != nil {
+		return nil, 0, err
+	}
+	total, err := s.repo.CountAllWithFilters(ctx, status, currency, network)
+	if err != nil {
+		return nil, 0, err
+	}
+	return settlements, total, nil
+}
+
+func (s *Service) GetSettlementByID(ctx context.Context, id uuid.UUID) (*domain.Settlement, error) {
+	return s.repo.FindByID(ctx, id)
+}
+
+func (s *Service) RetrySettlement(ctx context.Context, id uuid.UUID) (*domain.Settlement, error) {
+	set, err := s.repo.FindByID(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+
+	// Only retry if not completed/reconciled.
+	switch set.Status {
+	case domain.SettlementStatusCompleted, domain.SettlementStatusReconciled:
+		return set, nil
+	}
+
+	conn := s.stellarConnector
+	if string(set.Network) == string(domain.NetworkRipple) || string(set.Network) == "ripple" {
+		conn = s.rippleConnector
+	}
+	if string(set.Network) == string(domain.NetworkStellar) || string(set.Network) == "stellar" {
+		conn = s.stellarConnector
+	}
+
+	res, err := conn.SubmitSettlement(ctx, set)
+	if err != nil {
+		set.Status = domain.SettlementStatusFailed
+		set.UpdatedAt = time.Now()
+		_ = s.repo.Update(ctx, set)
+		return nil, err
+	}
+
+	now := time.Now()
+	set.TransactionHash = res.TxHash
+	set.Status = domain.SettlementStatusSubmitted
+	set.SubmissionCount++
+	set.LastSubmittedAt = &now
+	set.UpdatedAt = now
+	if err := s.repo.Update(ctx, set); err != nil {
+		return nil, err
+	}
+	if set.TransactionHash != "" {
+		go s.monitorSettlement(set.ID, set.TransactionHash)
+	}
+	return set, nil
+}
+
+func (s *Service) MarkReconciled(ctx context.Context, id uuid.UUID, reconciliationID *string) (*domain.Settlement, error) {
+	set, err := s.repo.FindByID(ctx, id)
+	if err != nil {
+		return nil, err
+	}
+	now := time.Now()
+	set.Status = domain.SettlementStatusReconciled
+	set.ReconciliationID = reconciliationID
+	set.UpdatedAt = now
+	if err := s.repo.Update(ctx, set); err != nil {
+		return nil, err
+	}
+	return set, nil
+}
+
 // Interfaces
 type Repository interface {
 	Create(ctx context.Context, settlement *domain.Settlement) error
 	Update(ctx context.Context, settlement *domain.Settlement) error
 	FindByID(ctx context.Context, id uuid.UUID) (*domain.Settlement, error)
 	FindSubmitted(ctx context.Context) ([]*domain.Settlement, error)
+	FindAll(ctx context.Context, limit, offset int) ([]*domain.Settlement, error)
+	CountAll(ctx context.Context) (int, error)
+	FindAllWithFilters(ctx context.Context, limit, offset int, status string, currency string, network string) ([]*domain.Settlement, error)
+	CountAllWithFilters(ctx context.Context, status string, currency string, network string) (int, error)
 }
 
 type TransactionRepository interface {

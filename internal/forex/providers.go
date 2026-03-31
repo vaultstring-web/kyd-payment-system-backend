@@ -19,6 +19,54 @@ import (
 	"github.com/shopspring/decimal"
 )
 
+// MockRateProvider returns stable, hardcoded rates for development.
+type MockRateProvider struct{}
+
+func NewMockRateProvider() *MockRateProvider {
+	return &MockRateProvider{}
+}
+
+func (p *MockRateProvider) GetRate(ctx context.Context, from, to domain.Currency) (*domain.ExchangeRate, error) {
+	// Stable hardcoded rates for development/local testing
+	rates := map[string]float64{
+		"MWK-USD": 0.00058,
+		"USD-MWK": 1720.00,
+		"MWK-EUR": 0.00054,
+		"EUR-MWK": 1850.00,
+		"MWK-GBP": 0.00046,
+		"GBP-MWK": 2170.00,
+		"MWK-ZAR": 0.011,
+		"ZAR-MWK": 91.00,
+		"MWK-KES": 0.076,
+		"KES-MWK": 13.15,
+		"MWK-NGN": 0.88,
+		"NGN-MWK": 1.14,
+		"MWK-CNY": 0.0042,
+		"CNY-MWK": 238.00,
+	}
+
+	key := fmt.Sprintf("%s-%s", from, to)
+	rateVal, ok := rates[key]
+	if !ok {
+		// Default to 1.0 if not found, to avoid errors
+		rateVal = 1.0
+	}
+
+	return &domain.ExchangeRate{
+		ID:             uuid.New(),
+		BaseCurrency:   from,
+		TargetCurrency: to,
+		Rate:           decimal.NewFromFloat(rateVal),
+		ValidFrom:      time.Now(),
+		ValidTo:        nil,
+		CreatedAt:      time.Now(),
+	}, nil
+}
+
+func (p *MockRateProvider) Name() string {
+	return "MockProvider"
+}
+
 // ExchangeRateAPIProvider fetches real rates from open.er-api.com
 type ExchangeRateAPIProvider struct {
 	client     *http.Client
@@ -121,40 +169,6 @@ func (p *ExchangeRateAPIProvider) fetchRates(ctx context.Context, base string) (
 	p.cacheMutex.Unlock()
 
 	return apiResp.Rates, nil
-}
-
-// MockRateProvider provides mock exchange rates for testing
-type MockRateProvider struct{}
-
-func NewMockRateProvider() *MockRateProvider {
-	return &MockRateProvider{}
-}
-
-func (p *MockRateProvider) Name() string {
-	return "MockProvider"
-}
-
-func (p *MockRateProvider) GetRate(ctx context.Context, from, to domain.Currency) (*domain.ExchangeRate, error) {
-	// Mock rates for MWK-CNY
-	rates := map[string]decimal.Decimal{
-		"MWK-CNY": decimal.NewFromFloat(0.0085),
-		"CNY-MWK": decimal.NewFromFloat(117.65),
-	}
-
-	key := string(from) + "-" + string(to)
-	rate, ok := rates[key]
-	if !ok {
-		rate = decimal.NewFromInt(1)
-	}
-
-	return &domain.ExchangeRate{
-		ID:             uuid.New(),
-		BaseCurrency:   from,
-		TargetCurrency: to,
-		Rate:           rate,
-		Source:         p.Name(),
-		ValidFrom:      time.Now(),
-	}, nil
 }
 
 // ==============================================================================

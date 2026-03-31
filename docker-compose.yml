@@ -1,21 +1,19 @@
-# ==============================================================================
-# Docker Compose - docker-compose.yml
+version: '3.8'
 
 services:
   postgres:
     image: postgres:15-alpine
     container_name: kyd-postgres
     environment:
-      POSTGRES_DB: kyd_dev
       POSTGRES_USER: kyd_user
       POSTGRES_PASSWORD: kyd_password
+      POSTGRES_DB: kyd_dev
     ports:
       - "5432:5432"
     volumes:
       - postgres_data:/var/lib/postgresql/data
-      - ./migrations:/docker-entrypoint-initdb.d
     healthcheck:
-      test: ["CMD-SHELL", "pg_isready -U kyd_user"]
+      test: ["CMD-SHELL", "pg_isready -U kyd_user -d kyd_dev"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -25,34 +23,38 @@ services:
     container_name: kyd-redis
     ports:
       - "6379:6379"
-    volumes:
-      - redis_data:/data
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 10s
-      timeout: 3s
+      timeout: 5s
       retries: 5
 
   auth-service:
     build:
       context: .
       dockerfile: build/docker/Dockerfile.auth
+      target: builder
     container_name: kyd-auth
+    volumes:
+      - .:/app
+    command: air -c build/docker/.air.auth.toml
     environment:
-      DATABASE_URL: postgres://kyd_user:kyd_password@postgres:5432/kyd_dev
-      # For production, set to verify-full and ensure certs are mounted
-      DB_SSL_MODE: disable
-      # Database Connection Pooling (Bank-Grade Tuning)
+      DATABASE_URL: postgres://kyd_user:kyd_password@postgres:5432/kyd_dev?sslmode=disable
       DB_MAX_OPEN_CONNS: 50
       DB_MAX_IDLE_CONNS: 25
       DB_CONN_MAX_LIFETIME: 5m
       REDIS_URL: redis://redis:6379
       JWT_SECRET: sk_4f9b8c1e7a23d94f0b6de1a28cd94f71d9f3b0c28c6fa47e9b12df67c8e41a25
-      ENCRYPTION_KEY: ${ENCRYPTION_KEY}
-      HMAC_KEY: ${HMAC_KEY}
+      ENCRYPTION_KEY: 4a2b9c8d7e6f5a4b3c2d1e0f9a8b7c6d5e4f3a2b1c0d9e8f7a6b5c4d3e2f1a0b
+      HMAC_KEY: b0a1f2e3d4c5b6a7f8e9d0c1b2a3f4e5d6c7b8a9f0e1d2c3b4a5f6e7d8c9b0a1
       SERVER_PORT: 8080
       ENV: local
       AUTH_RATE_LIMIT_ENABLED: "false"
+      GOOGLE_CLIENT_ID: mock-client-id
+      GOOGLE_CLIENT_SECRET: mock-client-secret
+      GOOGLE_MOCK_MODE: "true"
+      FRONTEND_URL: http://localhost:3012
+      GATEWAY_URL: http://localhost:9000
     ports:
       - "3000:8080"
     depends_on:
@@ -60,9 +62,11 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+      migrate-runner:
+        condition: service_completed_successfully
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:8080/health"]
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://127.0.0.1:8080/health"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -72,24 +76,28 @@ services:
     build:
       context: .
       dockerfile: build/docker/Dockerfile.payment
+      target: builder
     container_name: kyd-payment
+    volumes:
+      - .:/app
+    command: air -c build/docker/.air.payment.toml
     environment:
       DATABASE_URL: postgres://kyd_user:kyd_password@postgres:5432/kyd_dev?sslmode=disable
-      # Database Connection Pooling (Bank-Grade Tuning)
       DB_MAX_OPEN_CONNS: 50
       DB_MAX_IDLE_CONNS: 25
       DB_CONN_MAX_LIFETIME: 5m
       REDIS_URL: redis://redis:6379
       JWT_SECRET: sk_4f9b8c1e7a23d94f0b6de1a28cd94f71d9f3b0c28c6fa47e9b12df67c8e41a25
-      ENCRYPTION_KEY: ${ENCRYPTION_KEY}
-      HMAC_KEY: ${HMAC_KEY}
+      ENCRYPTION_KEY: 4a2b9c8d7e6f5a4b3c2d1e0f9a8b7c6d5e4f3a2b1c0d9e8f7a6b5c4d3e2f1a0b
+      HMAC_KEY: b0a1f2e3d4c5b6a7f8e9d0c1b2a3f4e5d6c7b8a9f0e1d2c3b4a5f6e7d8c9b0a1
       SERVER_PORT: 8080
-      # Risk Engine Configuration
       RISK_ENABLE_CIRCUIT_BREAKER: "true"
       RISK_MAX_DAILY_LIMIT: 100000000
       RISK_HIGH_VALUE_THRESHOLD: 100000
       RISK_ADMIN_APPROVAL_THRESHOLD: 500000
       RISK_RESTRICTED_COUNTRIES: "KP,IR,SY,CU"
+      STELLAR_SIMULATION: "true"
+      TREASURY_FEE_USER_ID: 11111111-1111-1111-1111-111111111111
     ports:
       - "3001:8080"
     depends_on:
@@ -97,9 +105,11 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+      migrate-runner:
+        condition: service_completed_successfully
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:8080/health"]
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://127.0.0.1:8080/health"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -109,19 +119,21 @@ services:
     build:
       context: .
       dockerfile: build/docker/Dockerfile.forex
+      target: builder
     container_name: kyd-forex
+    volumes:
+      - .:/app
+    command: air -c build/docker/.air.forex.toml
     environment:
       DATABASE_URL: postgres://kyd_user:kyd_password@postgres:5432/kyd_dev
-      # For production, set to verify-full and ensure certs are mounted
       DB_SSL_MODE: disable
-      # Database Connection Pooling (Bank-Grade Tuning)
       DB_MAX_OPEN_CONNS: 50
       DB_MAX_IDLE_CONNS: 25
       DB_CONN_MAX_LIFETIME: 5m
       REDIS_URL: redis://redis:6379
       JWT_SECRET: sk_4f9b8c1e7a23d94f0b6de1a28cd94f71d9f3b0c28c6fa47e9b12df67c8e41a25
-      ENCRYPTION_KEY: ${ENCRYPTION_KEY}
-      HMAC_KEY: ${HMAC_KEY}
+      ENCRYPTION_KEY: 4a2b9c8d7e6f5a4b3c2d1e0f9a8b7c6d5e4f3a2b1c0d9e8f7a6b5c4d3e2f1a0b
+      HMAC_KEY: b0a1f2e3d4c5b6a7f8e9d0c1b2a3f4e5d6c7b8a9f0e1d2c3b4a5f6e7d8c9b0a1
       SERVER_PORT: 8080
     ports:
       - "3002:8080"
@@ -130,9 +142,11 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+      migrate-runner:
+        condition: service_completed_successfully
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:8080/health"]
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://127.0.0.1:8080/health"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -142,17 +156,20 @@ services:
     build:
       context: .
       dockerfile: build/docker/Dockerfile.wallet
+      target: builder
     container_name: kyd-wallet
+    volumes:
+      - .:/app
+    command: air -c build/docker/.air.wallet.toml
     environment:
       DATABASE_URL: postgres://kyd_user:kyd_password@postgres:5432/kyd_dev?sslmode=disable
-      # Database Connection Pooling (Bank-Grade Tuning)
       DB_MAX_OPEN_CONNS: 50
       DB_MAX_IDLE_CONNS: 25
       DB_CONN_MAX_LIFETIME: 5m
       REDIS_URL: redis://redis:6379
       JWT_SECRET: sk_4f9b8c1e7a23d94f0b6de1a28cd94f71d9f3b0c28c6fa47e9b12df67c8e41a25
-      ENCRYPTION_KEY: ${ENCRYPTION_KEY}
-      HMAC_KEY: ${HMAC_KEY}
+      ENCRYPTION_KEY: 4a2b9c8d7e6f5a4b3c2d1e0f9a8b7c6d5e4f3a2b1c0d9e8f7a6b5c4d3e2f1a0b
+      HMAC_KEY: b0a1f2e3d4c5b6a7f8e9d0c1b2a3f4e5d6c7b8a9f0e1d2c3b4a5f6e7d8c9b0a1
       SERVER_PORT: 8080
     ports:
       - "3003:8080"
@@ -161,9 +178,11 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+      migrate-runner:
+        condition: service_completed_successfully
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:8080/health"]
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://127.0.0.1:8080/health"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -173,16 +192,22 @@ services:
     build:
       context: .
       dockerfile: build/docker/Dockerfile.settlement
+      target: builder
     container_name: kyd-settlement
+    volumes:
+      - .:/app
+    command: air -c build/docker/.air.settlement.toml
     environment:
       DATABASE_URL: postgres://kyd_user:kyd_password@postgres:5432/kyd_dev?sslmode=disable
-      # Database Connection Pooling (Bank-Grade Tuning)
       DB_MAX_OPEN_CONNS: 50
       DB_MAX_IDLE_CONNS: 25
       DB_CONN_MAX_LIFETIME: 5m
       REDIS_URL: redis://redis:6379
       STELLAR_NETWORK_URL: https://horizon-testnet.stellar.org
+      STELLAR_SIMULATION: "true"
       RIPPLE_SERVER_URL: wss://s.altnet.rippletest.net:51233
+      ENCRYPTION_KEY: 4a2b9c8d7e6f5a4b3c2d1e0f9a8b7c6d5e4f3a2b1c0d9e8f7a6b5c4d3e2f1a0b
+      HMAC_KEY: b0a1f2e3d4c5b6a7f8e9d0c1b2a3f4e5d6c7b8a9f0e1d2c3b4a5f6e7d8c9b0a1
       SERVER_PORT: 8080
     ports:
       - "3004:8080"
@@ -191,9 +216,11 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+      migrate-runner:
+        condition: service_completed_successfully
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:8080/health"]
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://127.0.0.1:8080/health"]
       interval: 10s
       timeout: 5s
       retries: 5
@@ -203,33 +230,23 @@ services:
     build:
       context: .
       dockerfile: build/docker/Dockerfile.gateway
+      target: builder
     container_name: kyd-gateway
+    volumes:
+      - .:/app
+    command: air -c build/docker/.air.gateway.toml
     environment:
       DATABASE_URL: postgres://kyd_user:kyd_password@postgres:5432/kyd_dev?sslmode=disable
-      # Database Connection Pooling (Bank-Grade Tuning)
       DB_MAX_OPEN_CONNS: 50
       DB_MAX_IDLE_CONNS: 25
       DB_CONN_MAX_LIFETIME: 5m
       REDIS_URL: redis://redis:6379
       JWT_SECRET: sk_4f9b8c1e7a23d94f0b6de1a28cd94f71d9f3b0c28c6fa47e9b12df67c8e41a25
+      ENCRYPTION_KEY: 4a2b9c8d7e6f5a4b3c2d1e0f9a8b7c6d5e4f3a2b1c0d9e8f7a6b5c4d3e2f1a0b
+      HMAC_KEY: b0a1f2e3d4c5b6a7f8e9d0c1b2a3f4e5d6c7b8a9f0e1d2c3b4a5f6e7d8c9b0a1
       SERVER_PORT: 8080
       ENV: local
       GATEWAY_RATE_LIMIT_ENABLED: "false"
-      ALLOWED_ORIGINS: >-
-        http://localhost:3012,
-        http://localhost:3016,
-        http://127.0.0.1:3012,
-        http://127.0.0.1:3016,
-        http://kyd-web:3012,
-        http://kyd-admin:3016,
-        http://host.docker.internal:3012,
-        http://host.docker.internal:3016,
-        https://localhost:3012,
-        https://localhost:3016,
-        https://kyd-web:3012,
-        https://kyd-admin:3016,
-        https://host.docker.internal:3012,
-        https://host.docker.internal:3016
       AUTH_SERVICE_URL: http://auth-service:8080
       PAYMENT_SERVICE_URL: http://payment-service:8080
       FOREX_SERVICE_URL: http://forex-service:8080
@@ -242,6 +259,10 @@ services:
         condition: service_healthy
       redis:
         condition: service_healthy
+      migrate-runner:
+        condition: service_completed_successfully
+      seed-runner:
+        condition: service_started
       auth-service:
         condition: service_healthy
       payment-service:
@@ -254,64 +275,108 @@ services:
         condition: service_healthy
     restart: unless-stopped
     healthcheck:
-      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://localhost:8080/health"]
+      test: ["CMD", "wget", "--no-verbose", "--tries=1", "--spider", "http://127.0.0.1:8080/health"]
       interval: 10s
       timeout: 5s
       retries: 5
       start_period: 10s
 
+  migrate-runner:
+    image: golang:1.25.0-alpine
+    container_name: kyd-migrate
+    working_dir: /app
+    volumes:
+      - ./:/app
+    environment:
+      DATABASE_URL: postgres://kyd_user:kyd_password@postgres:5432/kyd_dev?sslmode=disable
+      RUN_MIGRATIONS: "true"
+    depends_on:
+      postgres:
+        condition: service_healthy
+    command: ["/bin/sh", "-c", "if [ \"$$RUN_MIGRATIONS\" = \"true\" ]; then go mod download && go run ./cmd/migrate/main.go up; else echo \"Skipping migrations (RUN_MIGRATIONS!=true)\"; fi"]
+    restart: "no"
+
   seed-runner:
-    image: golang:1.24.11-alpine
+    image: golang:1.25.0-alpine
     container_name: kyd-seed
     working_dir: /app
     volumes:
       - ./:/app
     environment:
       DATABASE_URL: postgres://kyd_user:kyd_password@postgres:5432/kyd_dev?sslmode=disable
-      # Database Connection Pooling (Bank-Grade Tuning)
+      RUN_SEED: "true"
       DB_MAX_OPEN_CONNS: 50
       DB_MAX_IDLE_CONNS: 25
       DB_CONN_MAX_LIFETIME: 5m
       REDIS_URL: redis://redis:6379
       JWT_SECRET: sk_4f9b8c1e7a23d94f0b6de1a28cd94f71d9f3b0c28c6fa47e9b12df67c8e41a25
+      ENCRYPTION_KEY: 4a2b9c8d7e6f5a4b3c2d1e0f9a8b7c6d5e4f3a2b1c0d9e8f7a6b5c4d3e2f1a0b
+      HMAC_KEY: b0a1f2e3d4c5b6a7f8e9d0c1b2a3f4e5d6c7b8a9f0e1d2c3b4a5f6e7d8c9b0a1
       SERVER_PORT: 8080
-      ADMIN_EMAIL: admin@example.com
+      ADMIN_EMAIL: admin@kyd.com
     depends_on:
       postgres:
         condition: service_healthy
       redis:
         condition: service_healthy
-    command: ["/bin/sh", "-c", "go mod download && go run ./cmd/seed/main.go"]
-    profiles: ["tools"]
+      migrate-runner:
+        condition: service_completed_successfully
+    command: ["/bin/sh", "-c", "if [ \"$$RUN_SEED\" = \"true\" ]; then go mod download && go run ./cmd/seed/main.go; else echo \"Skipping seed (RUN_SEED!=true)\"; fi"]
     restart: "no"
 
   admin-frontend:
+    profiles:
+      - frontend
     build:
       context: ../admin
       dockerfile: Dockerfile
       args:
         NEXT_PUBLIC_GATEWAY_URL: http://localhost:9000
     container_name: kyd-admin
+    volumes:
+      - ../admin:/app
+      - /app/node_modules
+      - /app/.next
+    command: pnpm dev
     environment:
       GATEWAY_INTERNAL_URL: http://kyd-gateway:8080
+      NODE_OPTIONS: "--max-old-space-size=4096"
     ports:
       - "3016:3016"
+    deploy:
+      resources:
+        limits:
+          memory: 3G
     depends_on:
       gateway-service:
         condition: service_healthy
     restart: unless-stopped
 
   web-frontend:
+    profiles:
+      - frontend
     build:
       context: ../vaultstring-frontend
       dockerfile: Dockerfile
       args:
         NEXT_PUBLIC_GATEWAY_URL: http://localhost:9000
     container_name: kyd-web
+    volumes:
+      - ../vaultstring-frontend:/app
+      - /app/node_modules
+      - /app/.next
+    command: pnpm dev
     environment:
       GATEWAY_INTERNAL_URL: http://kyd-gateway:8080
+      NEXT_PUBLIC_GATEWAY_URL: http://kyd-gateway:8080
+      NEXT_PUBLIC_DISABLE_EMAIL_VERIFICATION: "true"
+      NODE_OPTIONS: "--max-old-space-size=4096"
     ports:
       - "3012:3012"
+    deploy:
+      resources:
+        limits:
+          memory: 3G
     depends_on:
       gateway-service:
         condition: service_healthy
