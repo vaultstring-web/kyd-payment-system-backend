@@ -1,0 +1,12 @@
+{
+	"folders": [
+		{
+			"path": "."
+		},
+		{
+			"name": "rapid-tie-gateway-backend",
+			"path": "../../test_app/rapid-tie-gateway-backend"
+		}
+	],
+	"settings": {}
+}
